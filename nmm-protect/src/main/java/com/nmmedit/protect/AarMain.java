@@ -43,7 +43,7 @@ public class AarMain {
             return;
         }
 
-        System.out.println("并行任务数: " + parallelConfig.getJobCount());
+        System.out.println("Jobs: " + parallelConfig.getJobCount());
 
         final File aar = new File(positionalArgs.get(0));
         final File outDir = new File(aar.getParentFile(), "build");

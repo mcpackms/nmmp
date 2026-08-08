@@ -89,7 +89,7 @@ public class JniCodeGenerator {
 
         handledNativeMethods.put(clazzName, new MyMethod(clazzName, methodName, parameterTypes, returnType));
 
-        // 使用 StringBuilder 批量构建，减少 IO 调用和 String.format 开销
+        // 使用 StringBuilder 批量构建函数签名（参数列表部分）
         StringBuilder sb = new StringBuilder(4096);
 
         sb.append(isRegisterNative ? "static " : "JNIEXPORT ");
@@ -98,56 +98,54 @@ public class JniCodeGenerator {
         sb.append("(JNIEnv *env, ");
         sb.append(isStatic ? "jclass jcls" : "jobject thiz");
 
-//        --------jni函数定义及参数赋值-------
+        // 构建参数列表和寄存器赋值
+        StringBuilder params = new StringBuilder();
+        StringBuilder regsAssign = new StringBuilder();
+        StringBuilder regFlagsAssign = new StringBuilder();
 
         //如果寄存器数量比较小直接使用栈上内存,不自己分配和释放
         boolean useStack = registerCount <= 8;
 
         //寄存器初始化
         if (useStack) {
-            sb.append(") {\n");
-            sb.append("    regptr_t regs[").append(registerCount).append("];\n");
-            //直接赋值数组元素值为0,初始化寄存器及其状态,不调用memset
+            regsAssign.append("    regptr_t regs[").append(registerCount).append("];\n");
             for (int i = 0; i < registerCount; i++) {
-                sb.append("    regs[").append(i).append("] = 0;\n");
+                regsAssign.append("    regs[").append(i).append("] = 0;\n");
             }
-            sb.append("    u1 reg_flags[").append(registerCount).append("];\n");
+            regFlagsAssign.append("    u1 reg_flags[").append(registerCount).append("];\n");
             for (int i = 0; i < registerCount; i++) {
-                sb.append("    reg_flags[").append(i).append("] = 0;\n");
+                regFlagsAssign.append("    reg_flags[").append(i).append("] = 0;\n");
             }
         } else {
-            sb.append(") {\n");
-            sb.append("    regptr_t *regs = (regptr_t *) calloc(").append(registerCount).append(", sizeof(regptr_t) + sizeof(u1));\n");
-            sb.append("    u1 *reg_flags = ((u1 *) regs) + (").append(registerCount).append(" * sizeof(regptr_t));\n");
+            regsAssign.append("    regptr_t *regs = (regptr_t *) calloc(").append(registerCount).append(", sizeof(regptr_t) + sizeof(u1));\n");
+            regFlagsAssign.append("    u1 *reg_flags = ((u1 *) regs) + (").append(registerCount).append(" * sizeof(regptr_t));\n");
         }
         int paramRegStart = registerCount - parameterRegisterCount;
         if (!isStatic) {
-            sb.append("    regs[").append(paramRegStart).append("] = (regptr_t) thiz;\n");
-            sb.append("    reg_flags[").append(paramRegStart).append("] = 1;\n");
+            regsAssign.append("    regs[").append(paramRegStart).append("] = (regptr_t) thiz;\n");
+            regFlagsAssign.append("    reg_flags[").append(paramRegStart).append("] = 1;\n");
             paramRegStart++;
         }
-        StringBuilder params = new StringBuilder();
+
         for (int i = 0, size = parameterTypes.size(); i < size; i++) {
             String type = parameterTypes.get(i).toString();
             String jniType = getJNIType(type);
             final int argNum = isStatic ? i : i + 1;
-            params.append(jniType)
-                    .append(" p")
-                    .append(argNum);
-            if (type.startsWith("[") || type.startsWith("L")) {//对象类型
-                sb.append("    regs[").append(paramRegStart).append("] = (regptr_t) p").append(argNum).append(";\n");
-                sb.append("    reg_flags[").append(paramRegStart).append("] = 1;\n");
+            params.append(jniType).append(" p").append(argNum);
+            if (type.startsWith("[") || type.startsWith("L")) {
+                regsAssign.append("    regs[").append(paramRegStart).append("] = (regptr_t) p").append(argNum).append(";\n");
+                regFlagsAssign.append("    reg_flags[").append(paramRegStart).append("] = 1;\n");
                 paramRegStart++;
             } else if (type.equals("F")) {
-                sb.append("    SET_REGISTER_FLOAT(").append(paramRegStart++).append(", p").append(argNum).append(");\n");
+                regsAssign.append("    SET_REGISTER_FLOAT(").append(paramRegStart++).append(", p").append(argNum).append(");\n");
             } else if (type.equals("D")) {
-                sb.append("    SET_REGISTER_DOUBLE(").append(paramRegStart++).append(", p").append(argNum).append(");\n");
+                regsAssign.append("    SET_REGISTER_DOUBLE(").append(paramRegStart++).append(", p").append(argNum).append(");\n");
                 paramRegStart++;
             } else if (type.equals("J")) {
-                sb.append("    SET_REGISTER_WIDE(").append(paramRegStart++).append(", p").append(argNum).append(");\n");
+                regsAssign.append("    SET_REGISTER_WIDE(").append(paramRegStart++).append(", p").append(argNum).append(");\n");
                 paramRegStart++;
             } else {
-                sb.append("    regs[").append(paramRegStart++).append("] = p").append(argNum).append(";\n");
+                regsAssign.append("    regs[").append(paramRegStart++).append("] = p").append(argNum).append(";\n");
             }
             if (i < size - 1) {
                 params.append(", ");
@@ -158,8 +156,12 @@ public class JniCodeGenerator {
         }
         sb.append(") {\n");
 
-        // 写入构建好的函数头
+        // 写入完整的函数头
         writer.write(sb.toString());
+        writer.write(regsAssign.toString());
+        writer.write("\n");
+        writer.write(regFlagsAssign.toString());
+        writer.write("\n");
 
         // 生成字节码数组
         writer.write("    static const u2 insns[] = {");

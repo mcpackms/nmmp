@@ -48,7 +48,7 @@ public class AabMain {
             return;
         }
 
-        System.out.println("并行任务数: " + parallelConfig.getJobCount());
+        System.out.println("Jobs: " + parallelConfig.getJobCount());
 
         final File inputAab = new File(positionalArgs.get(0));
         final File aabOutDir = new File(inputAab.getParentFile(), "bundleOut");

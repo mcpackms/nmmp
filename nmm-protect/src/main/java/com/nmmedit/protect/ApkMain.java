@@ -42,7 +42,7 @@ public class ApkMain {
             return;
         }
 
-        System.out.println("并行任务数: " + parallelConfig.getJobCount());
+        System.out.println("Jobs: " + parallelConfig.getJobCount());
 
         final File apk = new File(positionalArgs.get(0));
         final File outDir = new File(apk.getParentFile(), "build");
