@@ -112,10 +112,6 @@ public class BuildNativeLib {
         }
         return allLibs;
     }
-            }
-        }
-        return allLibs;
-    }
 
     /**
      * ABI 编译结果
