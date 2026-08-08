@@ -332,16 +332,15 @@ public class JniCodeGenerator {
     }
 
     /**
-     * 写入 C 文件头
+     * 写入 C 文件头（不包含 resolver，resolver 单独编译）
      */
     private void writeFileHeader(DexConfig config, Writer writer) throws IOException {
-        writer.write(String.format("\n" +
+        writer.write("\n" +
                 "#include <stdio.h>\n" +
                 "#include <string.h>\n" +
                 "#include <malloc.h>\n" +
                 "#include <jni.h>\n" +
                 "#include \"vm.h\"\n" +
-                "#include \"%s\"\n" +
                 "\n" +
                 "#ifdef __cplusplus\n" +
                 "extern \"C\" {\n" +
@@ -355,8 +354,7 @@ public class JniCodeGenerator {
                 "\n" +
                 "#define SET_REGISTER_DOUBLE(_idx, _val)     (*((double*) &regs[(_idx)]) = (_val));\n" +
                 "\n" +
-                "\n",
-                config.getResolverFile().getName()));
+                "\n");
     }
 
     /**
