@@ -2,6 +2,7 @@ package com.nmmedit.protect;
 
 import com.nmmedit.apkprotect.ApkFolders;
 import com.nmmedit.apkprotect.ApkProtect;
+import com.nmmedit.apkprotect.ParallelConfig;
 import com.nmmedit.apkprotect.deobfus.MappingReader;
 import com.nmmedit.apkprotect.dex2c.converter.ClassAnalyzer;
 import com.nmmedit.apkprotect.dex2c.converter.instructionrewriter.RandomInstructionRewriter;
@@ -14,11 +15,22 @@ public class ApkMain {
     public static void main(String[] args) throws IOException {
         if (args.length < 1) {
             System.err.println("No Input apk.");
-            System.err.println("<inApk> [<convertRuleFile> mapping.txt]");
+            System.err.println("<inApk> [<convertRuleFile> mapping.txt] [-j<n>]");
+            System.err.println("Options:");
+            System.err.println("  -j<n>      并行任务数 (默认: CPU核心数, 0=自动)");
             return;
         }
         final File apk = new File(args[0]);
         final File outDir = new File(apk.getParentFile(), "build");
+
+        // 解析并行配置
+        ParallelConfig parallelConfig = ParallelConfig.getDefault();
+        for (String arg : args) {
+            if (arg.startsWith("-j") || arg.startsWith("--jobs=")) {
+                parallelConfig = ParallelConfig.fromArg(arg);
+            }
+        }
+        System.out.println("并行任务数: " + parallelConfig.getJobCount());
 
         ClassAndMethodFilter filterConfig = new BasicKeepConfig();
         final SimpleRules simpleRules = new SimpleRules();
@@ -39,14 +51,13 @@ public class ApkMain {
         final ClassAnalyzer classAnalyzer = new ClassAnalyzer();
         //todo 可能需要加载某些厂商私有的sdk
 
-
         final ApkFolders apkFolders = new ApkFolders(apk, outDir);
-
 
         final ApkProtect apkProtect = new ApkProtect.Builder(apkFolders)
                 .setInstructionRewriter(new RandomInstructionRewriter())
                 .setFilter(filterConfig)
                 .setClassAnalyzer(classAnalyzer)
+                .setParallelConfig(parallelConfig)
                 .build();
         apkProtect.run();
     }

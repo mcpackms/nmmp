@@ -7,6 +7,7 @@ import com.android.tools.smali.dexlib2.util.MethodUtil;
 import com.android.tools.smali.dexlib2.writer.io.FileDataStore;
 import com.android.tools.smali.dexlib2.writer.pool.DexPool;
 import com.google.common.collect.HashMultimap;
+import com.nmmedit.apkprotect.ParallelConfig;
 import com.nmmedit.apkprotect.dex2c.converter.ClassAnalyzer;
 import com.nmmedit.apkprotect.dex2c.converter.JniCodeGenerator;
 import com.nmmedit.apkprotect.dex2c.converter.instructionrewriter.InstructionRewriter;
@@ -21,6 +22,10 @@ import java.io.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public class Dex2c {
 
@@ -42,17 +47,65 @@ public class Dex2c {
                                                @Nonnull InstructionRewriter instructionRewriter,
                                                @Nonnull ClassAnalyzer classAnalyzer,
                                                @Nonnull File outDir) throws IOException {
+        return handleAllDex(dexFiles, filter, instructionRewriter, classAnalyzer, outDir, ParallelConfig.getDefault());
+    }
+
+    /**
+     * 处理多个dex文件（支持并行配置）
+     *
+     * @param dexFiles dex文件列表
+     * @param outDir   生成c文件等输出目录
+     * @param parallelConfig 并行配置
+     * @return 输出结果配置
+     * @throws IOException
+     */
+    public static GlobalDexConfig handleAllDex(@Nonnull List<File> dexFiles,
+                                               @Nonnull ClassAndMethodFilter filter,
+                                               @Nonnull InstructionRewriter instructionRewriter,
+                                               @Nonnull ClassAnalyzer classAnalyzer,
+                                               @Nonnull File outDir,
+                                               @Nonnull ParallelConfig parallelConfig) throws IOException {
         if (!outDir.exists()) outDir.mkdirs();
         final GlobalDexConfig globalConfig = new GlobalDexConfig(outDir);
 
-        for (File file : dexFiles) {
-            final DexConfig config = handleDex(file, filter, classAnalyzer, instructionRewriter, outDir);
-
-            //不需要给外部
-            config.setShellMethods(null);
-
-            globalConfig.addDexConfig(config);
+        if (dexFiles.size() <= 1 || parallelConfig.getJobCount() <= 1) {
+            // 单 dex 或单线程，直接串行处理
+            for (File file : dexFiles) {
+                final DexConfig config = handleDex(file, filter, classAnalyzer, instructionRewriter, outDir);
+                config.setShellMethods(null);
+                globalConfig.addDexConfig(config);
+            }
+        } else {
+            // 多 dex 并行处理
+            ExecutorService executor = Executors.newFixedThreadPool(
+                    Math.min(parallelConfig.getJobCount(), dexFiles.size()));
+            try {
+                List<Future<DexConfig>> futures = new ArrayList<>();
+                for (File file : dexFiles) {
+                    futures.add(executor.submit(new Callable<DexConfig>() {
+                        @Override
+                        public DexConfig call() throws Exception {
+                            return handleDex(file, filter, classAnalyzer, instructionRewriter, outDir);
+                        }
+                    }));
+                }
+                for (Future<DexConfig> future : futures) {
+                    try {
+                        final DexConfig config = future.get();
+                        config.setShellMethods(null);
+                        globalConfig.addDexConfig(config);
+                    } catch (Exception e) {
+                        if (e.getCause() instanceof IOException) {
+                            throw (IOException) e.getCause();
+                        }
+                        throw new IOException("Dex processing failed", e);
+                    }
+                }
+            } finally {
+                executor.shutdown();
+            }
         }
+
         globalConfig.generateJniInitCode();
         return globalConfig;
     }

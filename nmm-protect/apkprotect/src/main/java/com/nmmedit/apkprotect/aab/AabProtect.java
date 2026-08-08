@@ -3,6 +3,7 @@ package com.nmmedit.apkprotect.aab;
 import com.android.zipflinger.*;
 import com.nmmedit.apkprotect.ApkProtect;
 import com.nmmedit.apkprotect.BuildNativeLib;
+import com.nmmedit.apkprotect.ParallelConfig;
 import com.nmmedit.apkprotect.aab.proto.ProtoUtils;
 import com.nmmedit.apkprotect.dex2c.Dex2c;
 import com.nmmedit.apkprotect.dex2c.GlobalDexConfig;
@@ -36,15 +37,18 @@ public class AabProtect {
     private final InstructionRewriter instructionRewriter;
     private final ClassAnalyzer classAnalyzer;
     private final ClassAndMethodFilter filter;
+    private final ParallelConfig parallelConfig;
 
     public AabProtect(@Nonnull AabFolders aabFolders,
                       @Nonnull InstructionRewriter instructionRewriter,
                       @Nonnull ClassAnalyzer classAnalyzer,
-                      ClassAndMethodFilter filter) {
+                      ClassAndMethodFilter filter,
+                      ParallelConfig parallelConfig) {
         this.aabFolders = aabFolders;
         this.instructionRewriter = instructionRewriter;
         this.classAnalyzer = classAnalyzer;
         this.filter = filter;
+        this.parallelConfig = parallelConfig;
     }
 
     public void run() throws IOException {
@@ -82,7 +86,8 @@ public class AabProtect {
                     filter,
                     instructionRewriter,
                     classAnalyzer,
-                    aabFolders.getCodeGeneratedDir());
+                    aabFolders.getCodeGeneratedDir(),
+                    parallelConfig);
 
 
             //需要放在主dex里的类
@@ -114,7 +119,7 @@ public class AabProtect {
 
             //编译c代码生成库,
             final List<String> abis = getAbis(inAab);
-            final Map<String, Map<File, File>> nativeLibs = BuildNativeLib.generateNativeLibs(aabFolders.getOutRootDir(), abis);
+            final Map<String, Map<File, File>> nativeLibs = BuildNativeLib.generateNativeLibs(aabFolders.getOutRootDir(), abis, parallelConfig);
 
 
             final File outputAab = aabFolders.getOutputAab();
@@ -254,6 +259,7 @@ public class AabProtect {
         private InstructionRewriter instructionRewriter;
         private ClassAnalyzer classAnalyzer;
         private ClassAndMethodFilter filter;
+        private ParallelConfig parallelConfig = ParallelConfig.getDefault();
 
 
         public Builder(AabFolders aabFolders) {
@@ -276,14 +282,19 @@ public class AabProtect {
             return this;
         }
 
+        public Builder setParallelConfig(ParallelConfig parallelConfig) {
+            this.parallelConfig = parallelConfig;
+            return this;
+        }
+
         public AabProtect build() {
             if (instructionRewriter == null) {
                 throw new RuntimeException("instructionRewriter == null");
             }
             if (classAnalyzer == null) {
-                throw new RuntimeException("classAnalyzer == null");
+                throw new RuntimeException("classAnalyzer==null");
             }
-            return new AabProtect(aabFolders, instructionRewriter, classAnalyzer, filter);
+            return new AabProtect(aabFolders, instructionRewriter, classAnalyzer, filter, parallelConfig);
         }
     }
 }

@@ -13,9 +13,18 @@ import com.nmmedit.apkprotect.dex2c.DexConfig;
 import com.nmmedit.apkprotect.dex2c.converter.instructionrewriter.InstructionRewriter;
 
 import javax.annotation.Nonnull;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.io.StringWriter;
 import java.io.Writer;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 
 /**
@@ -27,6 +36,16 @@ public class JniCodeGenerator {
     // 所以只保留注册本地函数这种方式
     // todo 再改改jni函数名生成方式应该可以把bridge这类方法也native化
     private final boolean isRegisterNative = true;
+
+    /**
+     * 每个 C 文件最大方法数
+     */
+    private static final int DEFAULT_MAX_METHODS_PER_FILE = 500;
+
+    /**
+     * 最多生成的 C 文件数，超过后剩余方法全部放入最后一个文件
+     */
+    private static final int MAX_FILES = 1000;
 
     private final HashMultimap<String, MyMethod> handledNativeMethods = HashMultimap.create();
 
@@ -70,12 +89,14 @@ public class JniCodeGenerator {
 
         handledNativeMethods.put(clazzName, new MyMethod(clazzName, methodName, parameterTypes, returnType));
 
-        writer.write(String.format("%s %s %s(JNIEnv *env, %s ",
-                isRegisterNative ? "static" : "JNIEXPORT",
-                getJNIType(returnType),
-                MyMethodUtil.getJniFunctionName(clazzName, methodName, parameterTypes, returnType),
-                isStatic ? "jclass jcls" : "jobject thiz")
-        );
+        // 使用 StringBuilder 批量构建，减少 IO 调用和 String.format 开销
+        StringBuilder sb = new StringBuilder(4096);
+
+        sb.append(isRegisterNative ? "static " : "JNIEXPORT ");
+        sb.append(getJNIType(returnType)).append(' ');
+        sb.append(MyMethodUtil.getJniFunctionName(clazzName, methodName, parameterTypes, returnType));
+        sb.append("(JNIEnv *env, ");
+        sb.append(isStatic ? "jclass jcls" : "jobject thiz");
 
 //        --------jni函数定义及参数赋值-------
 
@@ -83,39 +104,26 @@ public class JniCodeGenerator {
         boolean useStack = registerCount <= 8;
 
         //寄存器初始化
-        StringBuilder regsAssign;
-        StringBuilder regFlagsAssign;
         if (useStack) {
-            regsAssign = new StringBuilder(String.format(
-                    "    regptr_t regs[%d];\n", registerCount));
+            sb.append(") {\n");
+            sb.append("    regptr_t regs[").append(registerCount).append("];\n");
             //直接赋值数组元素值为0,初始化寄存器及其状态,不调用memset
-            //好处是和后面赋值参数及参数类型时,编译器可以优化无用赋值
-
             for (int i = 0; i < registerCount; i++) {
-                regsAssign.append(String.format("    regs[%d] = 0;\n", i));
+                sb.append("    regs[").append(i).append("] = 0;\n");
             }
-            regFlagsAssign = new StringBuilder(String.format(
-                    "    u1 reg_flags[%d];\n", registerCount));
-
+            sb.append("    u1 reg_flags[").append(registerCount).append("];\n");
             for (int i = 0; i < registerCount; i++) {
-                regFlagsAssign.append(String.format("    reg_flags[%d] = 0;\n", i));
+                sb.append("    reg_flags[").append(i).append("] = 0;\n");
             }
         } else {
-            //一次同时分配寄存器及它的状态所需内存
-            regsAssign = new StringBuilder(String.format(
-                    "    regptr_t *regs = (regptr_t *) calloc(%d, sizeof(regptr_t) + sizeof(u1));\n",
-                    registerCount));
-
-            //寄存器后面部分是寄存器状态数组,和寄存器数量一一对应
-            regFlagsAssign = new StringBuilder(
-                    String.format("    u1 *reg_flags = ((u1 *) regs) + (%d * sizeof(regptr_t));\n", registerCount));
+            sb.append(") {\n");
+            sb.append("    regptr_t *regs = (regptr_t *) calloc(").append(registerCount).append(", sizeof(regptr_t) + sizeof(u1));\n");
+            sb.append("    u1 *reg_flags = ((u1 *) regs) + (").append(registerCount).append(" * sizeof(regptr_t));\n");
         }
         int paramRegStart = registerCount - parameterRegisterCount;
         if (!isStatic) {
-            regsAssign.append(String.format("    regs[%d] = (regptr_t) thiz;\n", paramRegStart));
-            //对象寄存器需要标识出来
-            regFlagsAssign.append(String.format("    reg_flags[%d] = 1;\n", paramRegStart));
-
+            sb.append("    regs[").append(paramRegStart).append("] = (regptr_t) thiz;\n");
+            sb.append("    reg_flags[").append(paramRegStart).append("] = 1;\n");
             paramRegStart++;
         }
         StringBuilder params = new StringBuilder();
@@ -127,71 +135,59 @@ public class JniCodeGenerator {
                     .append(" p")
                     .append(argNum);
             if (type.startsWith("[") || type.startsWith("L")) {//对象类型
-                regsAssign.append(String.format("    regs[%d] = (regptr_t) p%d;\n", paramRegStart, argNum));
-
-                regFlagsAssign.append(String.format("    reg_flags[%d] = 1;\n", paramRegStart));
-
+                sb.append("    regs[").append(paramRegStart).append("] = (regptr_t) p").append(argNum).append(";\n");
+                sb.append("    reg_flags[").append(paramRegStart).append("] = 1;\n");
                 paramRegStart++;
             } else if (type.equals("F")) {
-                regsAssign.append(String.format("    SET_REGISTER_FLOAT(%d, p%d);\n", paramRegStart++, argNum));
+                sb.append("    SET_REGISTER_FLOAT(").append(paramRegStart++).append(", p").append(argNum).append(");\n");
             } else if (type.equals("D")) {
-                regsAssign.append(String.format("    SET_REGISTER_DOUBLE(%d, p%d);\n", paramRegStart++, argNum));
+                sb.append("    SET_REGISTER_DOUBLE(").append(paramRegStart++).append(", p").append(argNum).append(");\n");
                 paramRegStart++;
             } else if (type.equals("J")) {
-                regsAssign.append(String.format("    SET_REGISTER_WIDE(%d, p%d);\n", paramRegStart++, argNum));
+                sb.append("    SET_REGISTER_WIDE(").append(paramRegStart++).append(", p").append(argNum).append(");\n");
                 paramRegStart++;
             } else {
-                regsAssign.append(String.format("    regs[%d] = p%d;\n", paramRegStart++, argNum));
+                sb.append("    regs[").append(paramRegStart++).append("] = p").append(argNum).append(";\n");
             }
-            if (i < size - 1) {//最后不用加,
+            if (i < size - 1) {
                 params.append(", ");
             }
         }
         if (params.length() > 0) {
-            writer.append(", ").append(params.toString());
+            sb.append(", ").append(params);
         }
-        writer.append(") {\n");
-        writer.append(regsAssign);
-        writer.append("\n");
+        sb.append(") {\n");
 
-        writer.append(regFlagsAssign);
-        writer.append("\n");
-//        -----------结束----------------
+        // 写入构建好的函数头
+        writer.write(sb.toString());
 
-        writer.append("    static const u2 insns[] = {");
-
+        // 生成字节码数组
+        writer.write("    static const u2 insns[] = {");
         final byte[] instructionData = instructionRewriter.rewriteInstructions(implementation);
         final int dataLength = instructionData.length;
-        //生成字节码数组
         final DexBuffer instructionBuf = new DexBuffer(instructionData);
         for (int offset = 0; offset < dataLength; offset += 2) {
             if (offset % 20 == 0) {
-                writer.append("\n");
+                writer.write("\n");
             }
-            writer.append(String.format("0x%04x, ", instructionBuf.readUshort(offset)));
+            writer.write(String.format("0x%04x, ", instructionBuf.readUshort(offset)));
         }
+        writer.write("\n    };\n");
 
-        writer.append("\n    };\n");
-
-
+        // 异常表
         final byte[] tries = instructionRewriter.handleTries(implementation);
-        StringBuilder triesBuilder = new StringBuilder();
         if (tries.length == 0) {
-            triesBuilder.append("    const u1 *tries = NULL;\n");
+            writer.write("    const u1 *tries = NULL;\n");
         } else {
-
-            triesBuilder.append("    static const u1 tries[] = {");
+            writer.write("    static const u1 tries[] = {");
             for (int i = 0; i < tries.length; i++) {
-                if (i % 10 == 0) {//每行10个元素
-                    triesBuilder.append("\n");
+                if (i % 10 == 0) {
+                    writer.write("\n");
                 }
-                triesBuilder.append(String.format("0x%02x, ", tries[i] & 0xFF));
-
+                writer.write(String.format("0x%02x, ", tries[i] & 0xFF));
             }
-            triesBuilder.append("\n    };\n");
+            writer.write("\n    };\n");
         }
-        writer.write(triesBuilder.toString());
-
 
         //调用解释器
         writer.write(String.format("\n" +
@@ -212,16 +208,13 @@ public class JniCodeGenerator {
                     "                                &code,\n" +
                     "                                &dvmResolver);\n"
             );
-
         } else {
-
             writer.write("\n" +
                     "    vmInterpret(env,\n" +
                     "              &code,\n" +
                     "              &dvmResolver);\n"
             );
         }
-
 
         //不使用栈需要释放内存
         if (!useStack) {
@@ -231,11 +224,11 @@ public class JniCodeGenerator {
         //根据返回类型处理jvalue
         if (hasReturnValue) {
             char typeCh = returnType.charAt(0);
-            writer.append(
-                    String.format("    return value.%s;\n", Character.toLowerCase(typeCh == '[' ? 'L' : typeCh))
-            );
+            writer.write("    return value.");
+            writer.write(Character.toLowerCase(typeCh == '[' ? 'L' : typeCh));
+            writer.write(";\n");
         }
-        writer.append("}\n\n");
+        writer.write("}\n\n");
     }
 
     public Set<String> getHandledNativeClasses() {
@@ -250,37 +243,133 @@ public class JniCodeGenerator {
     public void generate(DexConfig config, Writer resolverWriter, Writer codeWriter) throws IOException {
         resolverCodeGenerator.generate(resolverWriter);
 
-        codeWriter.write(String.format("\n" +
-                        "#include <stdio.h>\n" +
-                        "#include <string.h>\n" +
-                        "#include <malloc.h>\n" +
-                        "#include <jni.h>\n" +
-                        "#include \"vm.h\"\n" +
-                        "#include \"%s\"\n" +
-                        "\n" +
-                        "#ifdef __cplusplus\n" +
-                        "extern \"C\" {\n" +
-                        "#endif\n" +
-                        "\n" +
-                        "\n" +
-                        "#define SET_REGISTER_FLOAT(_idx, _val)      (*((float*) &regs[(_idx)]) = (_val))\n" +
-                        "\n" +
-                        "\n" +
-                        "#define SET_REGISTER_WIDE(_idx, _val)       (regs[(_idx)] =(s8) (_val));\n" +
-                        "\n" +
-                        "#define SET_REGISTER_DOUBLE(_idx, _val)     (*((double*) &regs[(_idx)]) = (_val));\n" +
-                        "\n" +
-                        "\n"
-                , config.getResolverFile().getName()));
-
+        // 收集所有需要处理的方法
+        List<DexBackedMethod> allMethods = new ArrayList<>();
         for (DexBackedClassDef classDef : dexFile.getClasses()) {
             for (DexBackedMethod method : classDef.getMethods()) {
-                addMethod(method, codeWriter);
+                if (method.getImplementation() != null) {
+                    allMethods.add(method);
+                }
             }
         }
 
-        generateNativeMethodCode(config, codeWriter);
+        int totalMethods = allMethods.size();
+        int maxMethodsPerFile = DEFAULT_MAX_METHODS_PER_FILE;
 
+        // 计算需要的文件数，但不超过 MAX_FILES
+        int fileCount = (totalMethods + maxMethodsPerFile - 1) / maxMethodsPerFile;
+        if (fileCount > MAX_FILES) {
+            fileCount = MAX_FILES;
+            // 重新计算每个文件的方法数，确保所有方法都能放入
+            maxMethodsPerFile = (totalMethods + fileCount - 1) / fileCount;
+        }
+
+        // 如果只需要一个文件，使用原始方式（直接写入 codeWriter）
+        if (fileCount <= 1) {
+            generateSingleFile(config, codeWriter, allMethods);
+        } else {
+            generateSplitFiles(config, codeWriter, allMethods, fileCount, maxMethodsPerFile);
+        }
+    }
+
+    /**
+     * 生成单个 C 文件（原始方式）
+     */
+    private void generateSingleFile(DexConfig config, Writer codeWriter, List<DexBackedMethod> methods) throws IOException {
+        writeFileHeader(config, codeWriter);
+
+        for (DexBackedMethod method : methods) {
+            addMethod(method, codeWriter);
+        }
+
+        generateNativeMethodCode(config, codeWriter);
+        writeSetupFunction(config, codeWriter);
+        writeFileFooter(config, codeWriter);
+    }
+
+    /**
+     * 拆分为多个 C 文件
+     * 超过 MAX_FILES 时，剩余方法全部放入最后一个文件
+     */
+    private void generateSplitFiles(DexConfig config, Writer codeWriter, List<DexBackedMethod> methods,
+                                    int fileCount, int maxMethodsPerFile) throws IOException {
+        File outputDir = config.getOutputDir();
+        String dexName = config.getDexName();
+
+        // 生成多个 C 文件
+        for (int i = 0; i < fileCount; i++) {
+            int startIdx = i * maxMethodsPerFile;
+            int endIdx = Math.min(startIdx + maxMethodsPerFile, methods.size());
+            List<DexBackedMethod> fileMethods = methods.subList(startIdx, endIdx);
+
+            // 最后一个文件包含注册代码和 setup 函数
+            boolean isLastFile = (i == fileCount - 1);
+
+            File cFile = new File(outputDir, dexName + "_native_functions_" + i + ".c");
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(cFile), 64 * 1024)) {
+                writeFileHeader(config, writer);
+
+                for (DexBackedMethod method : fileMethods) {
+                    addMethod(method, writer);
+                }
+
+                if (isLastFile) {
+                    generateNativeMethodCode(config, writer);
+                    writeSetupFunction(config, writer);
+                }
+
+                writeFileFooter(config, writer);
+            }
+        }
+
+        // 在主文件中生成 include 指令，包含所有拆分文件
+        for (int i = 0; i < fileCount; i++) {
+            codeWriter.write(String.format("#include \"%s_native_functions_%d.c\"\n", dexName, i));
+        }
+        codeWriter.write("\n");
+    }
+
+    /**
+     * 写入 C 文件头
+     */
+    private void writeFileHeader(DexConfig config, Writer writer) throws IOException {
+        writer.write(String.format("\n" +
+                "#include <stdio.h>\n" +
+                "#include <string.h>\n" +
+                "#include <malloc.h>\n" +
+                "#include <jni.h>\n" +
+                "#include \"vm.h\"\n" +
+                "#include \"%s\"\n" +
+                "\n" +
+                "#ifdef __cplusplus\n" +
+                "extern \"C\" {\n" +
+                "#endif\n" +
+                "\n" +
+                "\n" +
+                "#define SET_REGISTER_FLOAT(_idx, _val)      (*((float*) &regs[(_idx)]) = (_val))\n" +
+                "\n" +
+                "\n" +
+                "#define SET_REGISTER_WIDE(_idx, _val)       (regs[(_idx)] =(s8) (_val));\n" +
+                "\n" +
+                "#define SET_REGISTER_DOUBLE(_idx, _val)     (*((double*) &regs[(_idx)]) = (_val));\n" +
+                "\n" +
+                "\n",
+                config.getResolverFile().getName()));
+    }
+
+    /**
+     * 写入 C 文件尾
+     */
+    private void writeFileFooter(DexConfig config, Writer writer) throws IOException {
+        writer.write("\n\n#ifdef __cplusplus\n" +
+                "}\n" +
+                "#endif\n\n");
+    }
+
+    /**
+     * 写入 setup 函数
+     */
+    private void writeSetupFunction(DexConfig config, Writer codeWriter) throws IOException {
         codeWriter.write(String.format("void %s(JNIEnv *env) {\n", config.getHeaderFileAndSetupFunc().setupFunctionName));
 
         codeWriter.write("\n    //符号解析器初始化\n");
@@ -301,16 +390,11 @@ public class JniCodeGenerator {
                             "   (*env)->RegisterNatives(env, clazz, &nativeMethod, 1);\n" +
                             "\n" +
                             "   (*env)->DeleteLocalRef(env, clazz);\n" +
-                            "\n"
-                    , config.getRegisterNativesClassName(),
+                            "\n",
+                    config.getRegisterNativesClassName(),
                     config.getRegisterNativesMethodName(), funName));
         }
         codeWriter.write("}\n");
-
-        codeWriter.write(
-                "\n\n#ifdef __cplusplus\n" +
-                        "}\n" +
-                        "#endif\n\n");
     }
 
     //生成本地方法注册代码,同时返回类名和方法数组索引等

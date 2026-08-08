@@ -6,10 +6,15 @@ import org.jetbrains.annotations.NotNull;
 
 import javax.annotation.Nonnull;
 import java.io.*;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public class BuildNativeLib {
     //库名称
@@ -19,8 +24,20 @@ public class BuildNativeLib {
     //虚拟机库名称,如果cmake里配置为静态库,这个可以忽略
     public static final String VM_NAME = "nmmvm";
 
+    /**
+     * 生成 native libs（使用默认并行配置）
+     */
     public static Map<String, Map<File, File>> generateNativeLibs(@Nonnull File outDir,
                                                                   @Nonnull final List<String> abis) throws IOException {
+        return generateNativeLibs(outDir, abis, ParallelConfig.getDefault());
+    }
+
+    /**
+     * 生成 native libs（支持并行配置）
+     */
+    public static Map<String, Map<File, File>> generateNativeLibs(@Nonnull File outDir,
+                                                                  @Nonnull final List<String> abis,
+                                                                  @Nonnull final ParallelConfig parallelConfig) throws IOException {
         String cmakePath = System.getenv("CMAKE_PATH");
         if (isEmpty(cmakePath)) {
             System.err.println("No CMAKE_PATH");
@@ -37,24 +54,70 @@ public class BuildNativeLib {
             System.err.println("No ANDROID_NDK_HOME. Default is " + ndkHome);
         }
 
-
         final Map<String, Map<File, File>> allLibs = new HashMap<>();
 
-        for (String abi : abis) {
-            final BuildNativeLib.CMakeOptions cmakeOptions = new BuildNativeLib.CMakeOptions(cmakePath,
-                    sdkHome,
-                    ndkHome, 21,
-                    outDir.getAbsolutePath(),
-                    BuildNativeLib.CMakeOptions.BuildType.RELEASE,
-                    abi);
-
-            //删除上次创建的目录
-            FileUtils.deleteFile(new File(cmakeOptions.getBuildPath()));
-
-            final Map<File, File> files = BuildNativeLib.build(cmakeOptions);
-            allLibs.put(abi, files);
+        if (abis.size() <= 1 || parallelConfig.getJobCount() <= 1) {
+            // 单 ABI 或单线程，直接串行处理
+            for (String abi : abis) {
+                final CMakeOptions cmakeOptions = new CMakeOptions(cmakePath,
+                        sdkHome, ndkHome, 21,
+                        outDir.getAbsolutePath(),
+                        CMakeOptions.BuildType.RELEASE,
+                        abi);
+                FileUtils.deleteFile(new File(cmakeOptions.getBuildPath()));
+                final Map<File, File> files = build(cmakeOptions, parallelConfig.getJobCount());
+                allLibs.put(abi, files);
+            }
+        } else {
+            // 多 ABI 并行编译
+            ExecutorService executor = Executors.newFixedThreadPool(
+                    Math.min(parallelConfig.getJobCount(), abis.size()));
+            try {
+                List<Future<AbiBuildResult>> futures = new ArrayList<>();
+                for (final String abi : abis) {
+                    futures.add(executor.submit(new Callable<AbiBuildResult>() {
+                        @Override
+                        public AbiBuildResult call() throws Exception {
+                            final CMakeOptions cmakeOptions = new CMakeOptions(cmakePath,
+                                    sdkHome, ndkHome, 21,
+                                    outDir.getAbsolutePath(),
+                                    CMakeOptions.BuildType.RELEASE,
+                                    abi);
+                            FileUtils.deleteFile(new File(cmakeOptions.getBuildPath()));
+                            final Map<File, File> files = build(cmakeOptions, parallelConfig.getJobCount());
+                            return new AbiBuildResult(abi, files);
+                        }
+                    }));
+                }
+                for (Future<AbiBuildResult> future : futures) {
+                    try {
+                        AbiBuildResult result = future.get();
+                        allLibs.put(result.abi, result.files);
+                    } catch (Exception e) {
+                        if (e.getCause() instanceof IOException) {
+                            throw (IOException) e.getCause();
+                        }
+                        throw new IOException("Native build failed", e);
+                    }
+                }
+            } finally {
+                executor.shutdown();
+            }
         }
         return allLibs;
+    }
+
+    /**
+     * ABI 编译结果
+     */
+    private static class AbiBuildResult {
+        final String abi;
+        final Map<File, File> files;
+
+        AbiBuildResult(String abi, Map<File, File> files) {
+            this.abi = abi;
+            this.files = files;
+        }
     }
 
     private static boolean isEmpty(String s) {
@@ -64,17 +127,26 @@ public class BuildNativeLib {
 
     //编译出native lib，同时返回最后的so文件
     public static Map<File, File> build(@NotNull CMakeOptions options) throws IOException {
+        return build(options, 0);
+    }
+
+    //编译出native lib，同时返回最后的so文件（支持并行编译）
+    public static Map<File, File> build(@NotNull CMakeOptions options, int jobCount) throws IOException {
 
         final List<String> cmakeArguments = options.getCmakeArguments();
         //cmake
         execCmd(cmakeArguments);
 
         //cmake --build <dir>
-        execCmd(Arrays.asList(
-                options.getCmakeBinaryPath(),
-                "--build",
-                options.getBuildPath()
-        ));
+        List<String> buildCmd = new ArrayList<>();
+        buildCmd.add(options.getCmakeBinaryPath());
+        buildCmd.add("--build");
+        buildCmd.add(options.getBuildPath());
+        if (jobCount > 0) {
+            buildCmd.add("-j");
+            buildCmd.add(String.valueOf(jobCount));
+        }
+        execCmd(buildCmd);
         //strip
         final Map<File, File> soMaps = options.getSharedObjectFileMap();
         for (Map.Entry<File, File> entry : soMaps.entrySet()) {

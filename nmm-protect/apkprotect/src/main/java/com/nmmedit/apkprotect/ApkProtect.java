@@ -35,21 +35,20 @@ public class ApkProtect {
     private final ApkFolders apkFolders;
     private final InstructionRewriter instructionRewriter;
     private final ClassAndMethodFilter filter;
-
     private final ClassAnalyzer classAnalyzer;
+    private final ParallelConfig parallelConfig;
 
     private ApkProtect(ApkFolders apkFolders,
                        InstructionRewriter instructionRewriter,
                        ClassAndMethodFilter filter,
-                       ClassAnalyzer classAnalyzer
+                       ClassAnalyzer classAnalyzer,
+                       ParallelConfig parallelConfig
     ) {
         this.apkFolders = apkFolders;
-
         this.instructionRewriter = instructionRewriter;
-
         this.filter = filter;
         this.classAnalyzer = classAnalyzer;
-
+        this.parallelConfig = parallelConfig;
     }
 
     public void run() throws IOException {
@@ -95,7 +94,8 @@ public class ApkProtect {
                     filter,
                     instructionRewriter,
                     classAnalyzer,
-                    apkFolders.getCodeGeneratedDir());
+                    apkFolders.getCodeGeneratedDir(),
+                    parallelConfig);
 
 
             //需要放在主dex里的类
@@ -117,7 +117,7 @@ public class ApkProtect {
 
             final List<String> abis = getAbis(apkFile);
 
-            final Map<String, Map<File, File>> nativeLibs = BuildNativeLib.generateNativeLibs(apkFolders.getOutRootDir(), abis);
+            final Map<String, Map<File, File>> nativeLibs = BuildNativeLib.generateNativeLibs(apkFolders.getOutRootDir(), abis, parallelConfig);
 
             File mainDex = outDexFiles.get(0);
 
@@ -439,6 +439,7 @@ public class ApkProtect {
         private InstructionRewriter instructionRewriter;
         private ClassAndMethodFilter filter;
         private ClassAnalyzer classAnalyzer;
+        private ParallelConfig parallelConfig = ParallelConfig.getDefault();
 
 
         public Builder(ApkFolders apkFolders) {
@@ -461,6 +462,11 @@ public class ApkProtect {
             return this;
         }
 
+        public Builder setParallelConfig(ParallelConfig parallelConfig) {
+            this.parallelConfig = parallelConfig;
+            return this;
+        }
+
         public ApkProtect build() {
             if (instructionRewriter == null) {
                 throw new RuntimeException("instructionRewriter == null");
@@ -468,7 +474,7 @@ public class ApkProtect {
             if (classAnalyzer == null) {
                 throw new RuntimeException("classAnalyzer==null");
             }
-            return new ApkProtect(apkFolders, instructionRewriter, filter, classAnalyzer);
+            return new ApkProtect(apkFolders, instructionRewriter, filter, classAnalyzer, parallelConfig);
         }
     }
 }

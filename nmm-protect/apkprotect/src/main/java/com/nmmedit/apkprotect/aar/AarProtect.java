@@ -5,6 +5,7 @@ import com.android.tools.smali.dexlib2.iface.Method;
 import com.android.zipflinger.*;
 import com.google.common.collect.HashMultimap;
 import com.nmmedit.apkprotect.BuildNativeLib;
+import com.nmmedit.apkprotect.ParallelConfig;
 import com.nmmedit.apkprotect.aar.asm.AsmMethod;
 import com.nmmedit.apkprotect.aar.asm.AsmUtils;
 import com.nmmedit.apkprotect.aar.asm.InjectStaticBlockVisitor;
@@ -33,14 +34,18 @@ public class AarProtect {
 
     private final ClassAnalyzer classAnalyzer;
 
+    private final ParallelConfig parallelConfig;
+
     private AarProtect(AarFolders aarFolders,
                        InstructionRewriter instructionRewriter,
                        ClassAndMethodFilter filter,
-                       ClassAnalyzer classAnalyzer) {
+                       ClassAnalyzer classAnalyzer,
+                       ParallelConfig parallelConfig) {
         this.aarFolders = aarFolders;
         this.instructionRewriter = instructionRewriter;
         this.filter = filter;
         this.classAnalyzer = classAnalyzer;
+        this.parallelConfig = parallelConfig;
     }
 
     public void run() throws IOException {
@@ -72,7 +77,7 @@ public class AarProtect {
 
 
             final Map<String, Map<File, File>> nativeLibs = BuildNativeLib.generateNativeLibs(aarFolders.apkFolders.getOutRootDir(),
-                    getAbis());
+                    getAbis(), parallelConfig);
 
             final ZipMap zipMap = ZipMap.from(aar.toPath());
             final ZipSource zipSource = new ZipSource(zipMap);
@@ -279,6 +284,7 @@ public class AarProtect {
         private InstructionRewriter instructionRewriter;
         private ClassAndMethodFilter filter;
         private ClassAnalyzer classAnalyzer;
+        private ParallelConfig parallelConfig = ParallelConfig.getDefault();
 
 
         public Builder(AarFolders aarFolders) {
@@ -301,6 +307,11 @@ public class AarProtect {
             return this;
         }
 
+        public Builder setParallelConfig(ParallelConfig parallelConfig) {
+            this.parallelConfig = parallelConfig;
+            return this;
+        }
+
         public AarProtect build() {
             if (instructionRewriter == null) {
                 throw new RuntimeException("instructionRewriter == null");
@@ -308,7 +319,7 @@ public class AarProtect {
             if (classAnalyzer == null) {
                 throw new RuntimeException("classAnalyzer==null");
             }
-            return new AarProtect(aarFolders, instructionRewriter, filter, classAnalyzer);
+            return new AarProtect(aarFolders, instructionRewriter, filter, classAnalyzer, parallelConfig);
         }
     }
 }

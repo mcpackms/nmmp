@@ -1,5 +1,6 @@
 package com.nmmedit.protect;
 
+import com.nmmedit.apkprotect.ParallelConfig;
 import com.nmmedit.apkprotect.aar.AarFolders;
 import com.nmmedit.apkprotect.aar.AarProtect;
 import com.nmmedit.apkprotect.deobfus.MappingReader;
@@ -15,11 +16,22 @@ public class AarMain {
     public static void main(String[] args) throws IOException {
         if (args.length < 1) {
             System.err.println("No Input aar.");
-            System.err.println("<inAar> [<convertRuleFile> mapping.txt]");
+            System.err.println("<inAar> [<convertRuleFile> mapping.txt] [-j<n>]");
+            System.err.println("Options:");
+            System.err.println("  -j<n>      并行任务数 (默认: CPU核心数, 0=自动)");
             return;
         }
         final File aar = new File(args[0]);
         final File outDir = new File(aar.getParentFile(), "build");
+
+        // 解析并行配置
+        ParallelConfig parallelConfig = ParallelConfig.getDefault();
+        for (String arg : args) {
+            if (arg.startsWith("-j") || arg.startsWith("--jobs=")) {
+                parallelConfig = ParallelConfig.fromArg(arg);
+            }
+        }
+        System.out.println("并行任务数: " + parallelConfig.getJobCount());
 
         ClassAndMethodFilter filterConfig = new BasicKeepConfig();
         final SimpleRules simpleRules = new SimpleRules();
@@ -47,6 +59,7 @@ public class AarMain {
                 .setInstructionRewriter(new RandomInstructionRewriter())
                 .setFilter(filterConfig)
                 .setClassAnalyzer(classAnalyzer)
+                .setParallelConfig(parallelConfig)
                 .build();
         aarProtect.run();
     }
