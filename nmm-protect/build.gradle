@@ -17,6 +17,8 @@ static def getDate() {
 jar {
     archiveBaseName = "vm-protect"
     archiveVersion = getDate()
+    dependsOn ':arsc:jar'
+    dependsOn ':apkprotect:jar'
     manifest {
         attributes(
                 'Main-Class': 'com.nmmedit.protect.Main'
