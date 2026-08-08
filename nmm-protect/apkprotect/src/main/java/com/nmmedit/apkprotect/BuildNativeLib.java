@@ -54,14 +54,20 @@ public class BuildNativeLib {
             System.err.println("No ANDROID_NDK_HOME. Default is " + ndkHome);
         }
 
+        // 创建 final 副本供匿名类使用
+        final String finalCmakePath = cmakePath;
+        final String finalSdkHome = sdkHome;
+        final String finalNdkHome = ndkHome;
+        final String finalOutDir = outDir.getAbsolutePath();
+
         final Map<String, Map<File, File>> allLibs = new HashMap<>();
 
         if (abis.size() <= 1 || parallelConfig.getJobCount() <= 1) {
             // 单 ABI 或单线程，直接串行处理
             for (String abi : abis) {
-                final CMakeOptions cmakeOptions = new CMakeOptions(cmakePath,
-                        sdkHome, ndkHome, 21,
-                        outDir.getAbsolutePath(),
+                final CMakeOptions cmakeOptions = new CMakeOptions(finalCmakePath,
+                        finalSdkHome, finalNdkHome, 21,
+                        finalOutDir,
                         CMakeOptions.BuildType.RELEASE,
                         abi);
                 FileUtils.deleteFile(new File(cmakeOptions.getBuildPath()));
@@ -78,9 +84,9 @@ public class BuildNativeLib {
                     futures.add(executor.submit(new Callable<AbiBuildResult>() {
                         @Override
                         public AbiBuildResult call() throws Exception {
-                            final CMakeOptions cmakeOptions = new CMakeOptions(cmakePath,
-                                    sdkHome, ndkHome, 21,
-                                    outDir.getAbsolutePath(),
+                            final CMakeOptions cmakeOptions = new CMakeOptions(finalCmakePath,
+                                    finalSdkHome, finalNdkHome, 21,
+                                    finalOutDir,
                                     CMakeOptions.BuildType.RELEASE,
                                     abi);
                             FileUtils.deleteFile(new File(cmakeOptions.getBuildPath()));
@@ -102,6 +108,10 @@ public class BuildNativeLib {
                 }
             } finally {
                 executor.shutdown();
+            }
+        }
+        return allLibs;
+    }
             }
         }
         return allLibs;
