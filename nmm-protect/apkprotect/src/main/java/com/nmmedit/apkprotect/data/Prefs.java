@@ -87,4 +87,20 @@ public class Prefs {
     public static String ndkStrip() {
         return config().environment.ndk_strip;
     }
+
+    /**
+     * 配置文件里的主 so 库名, 未配置时返回空串
+     */
+    public static String libName() {
+        final String name = config().lib_name;
+        return name == null ? "" : name;
+    }
+
+    /**
+     * 配置文件里的 vm so 库名, 未配置时返回空串
+     */
+    public static String vmLibName() {
+        final String name = config().vm_lib_name;
+        return name == null ? "" : name;
+    }
 }

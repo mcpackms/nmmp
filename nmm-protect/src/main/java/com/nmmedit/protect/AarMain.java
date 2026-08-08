@@ -1,5 +1,6 @@
 package com.nmmedit.protect;
 
+import com.nmmedit.apkprotect.BuildNativeLib;
 import com.nmmedit.apkprotect.ParallelConfig;
 import com.nmmedit.apkprotect.aar.AarFolders;
 import com.nmmedit.apkprotect.aar.AarProtect;
@@ -33,6 +34,8 @@ public class AarMain {
                 parallelConfig = ParallelConfig.fromArg(arg);
             } else if (arg.startsWith("--jobs=")) {
                 parallelConfig = ParallelConfig.fromArg(arg);
+            } else if (BuildNativeLib.parseLibNameArg(arg)) {
+                // -libname=xxx / -vmlibname=xxx 等库名选项
             } else {
                 positionalArgs.add(arg);
             }

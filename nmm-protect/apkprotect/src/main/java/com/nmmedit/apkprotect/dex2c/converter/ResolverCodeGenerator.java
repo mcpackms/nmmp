@@ -15,12 +15,25 @@ import java.util.List;
 
 /**
  * 根据dex生成符号解析代码,比如字符串常量池,类型常量池这些
+ *
+ * <p>输出两个文件:
+ * <ul>
+ *   <li>{@code <dex>_resolver.h} — 类型定义、extern 声明、宏、函数声明,供所有 native functions 文件 include</li>
+ *   <li>{@code <dex>_resolver.c} — 变量定义与函数实现,单独编译</li>
+ * </ul>
+ * 所有跨编译单元符号均以 dex 名前缀避免多 dex 链接冲突。
  */
 
 public class ResolverCodeGenerator {
 
 
     private final References references;
+
+    //当前 dex 的符号前缀,如 classes2,避免多个 dex 生成的符号在同一个 so 里冲突
+    private String symbolPrefix;
+
+    private Writer header;
+    private Writer source;
 
     public ResolverCodeGenerator(DexBackedDexFile dexFile,
                                  @Nonnull ClassAnalyzer analyzer
@@ -33,30 +46,58 @@ public class ResolverCodeGenerator {
         return references;
     }
 
-    public void generate(Writer writer) throws IOException {
-        writer.write("#include \"GlobalCache.h\"\n");
-        writer.write("#include \"ConstantPool.h\"\n\n");
-        writer.write("#include <pthread.h>\n\n\n");
+    public void generate(Writer headerWriter, Writer sourceWriter, @Nonnull String dexName) throws IOException {
+        this.symbolPrefix = dexName;
+        this.header = headerWriter;
+        this.source = sourceWriter;
 
-        generateStringPool(writer);
-        generateTypePool(writer);
+        String guard = (dexName + "_RESOLVER_H").toUpperCase().replaceAll("[^A-Z0-9_]", "_");
+
+        // ===== 头文件:声明部分 =====
+        headerWriter.write("#ifndef " + guard + "\n");
+        headerWriter.write("#define " + guard + "\n\n");
+        headerWriter.write("#include <jni.h>\n");
+        headerWriter.write("#include \"vm.h\"\n");
+        headerWriter.write("#include \"GlobalCache.h\"\n");
+        headerWriter.write("#include \"ConstantPool.h\"\n\n\n");
+
+        // ===== 源文件:定义部分 =====
+        sourceWriter.write(String.format("#include \"%s_resolver.h\"\n", dexName));
+        sourceWriter.write("#include <stdio.h>\n");
+        sourceWriter.write("#include <stdlib.h>\n");
+        sourceWriter.write("#include <string.h>\n");
+        sourceWriter.write("#include <pthread.h>\n\n\n");
+
+        generateStringPool();
+        generateTypePool();
 
         //额外添加的,方便生成结构体
-        generateClassNamePool(writer);
-        generateSignaturePool(writer);
+        generateClassNamePool();
+        generateSignaturePool();
 
-        generateFieldPool(writer);
+        generateFieldPool();
 
-        generateMethodPool(writer);
+        generateMethodPool();
 
-        generateStringConstants(writer);
+        generateStringConstants();
 
         //生成初始化函数及符号解析器结构体
-        generateResolver(writer);
+        generateResolver();
+
+        headerWriter.write("\n#endif //" + guard + "\n");
+        headerWriter.flush();
+        sourceWriter.flush();
+    }
+
+    /**
+     * 带 dex 前缀的符号名
+     */
+    private String sym(String base) {
+        return symbolPrefix + "_" + base;
     }
 
     //产生const-string*指令对应的缓存
-    private void generateStringConstants(Writer writer) throws IOException {
+    private void generateStringConstants() throws IOException {
         final References references = this.references;
         final List<String> constantStringPool = references.getConstantStringPool();
 
@@ -66,67 +107,98 @@ public class ResolverCodeGenerator {
             constStringIds[i] = references.getStringItemIndex(constantStringPool.get(i));
         }
 
-        //
-        writer.write(
+        //字符串常量索引缓存,const-string指令索引被重写，直接根据索引得到字符串索引，然后创建jstring
+        header.write(
                 "\n//字符串常量索引缓存,const-string指令索引被重写，直接根据索引得到字符串索引，然后创建jstring\n" +
                         "typedef struct {\n" +
                         "    u4 idx;\n" +
-                        "} ConstStringId;\n"
+                        "} ConstStringId;\n\n"
         );
+        header.write("extern const ConstStringId " + sym("gStringConstantIds") + "[];\n");
+        header.write("extern jstring " + sym("gStringConstants") + "[];\n\n");
 
-        writer.write("static const ConstStringId gStringConstantIds[] = {\n");
+        source.write("extern const ConstStringId " + sym("gStringConstantIds") + "[] = {\n");
         for (int offset : constStringIds) {
-            writer.write(String.format("    {.idx=0x%04x},\n", offset));
+            source.write(String.format("    {.idx=0x%04x},\n", offset));
         }
-        writer.write("};\n");
+        source.write("};\n");
 
-        writer.write(String.format("static jstring gStringConstants[%d];\n\n", constStringIds.length));
+        source.write(String.format("jstring %s[%d];\n\n", sym("gStringConstants"), constStringIds.length));
     }
 
-    private void generateResolver(Writer writer) throws IOException {
-        writer.write("static void resolver_init(JNIEnv *env) {\n" +
-                "    if(sizeof(gFields) == 0) return;\n" +
-                "    if(sizeof(gMethods) == 0) return;\n" +
-                "    if(sizeof(gStringConstants) == 0) return;\n" +
-                "    memset(gFields, 0, sizeof(gFields));\n" +
-                "    memset(gMethods, 0, sizeof(gMethods));\n" +
-                "    memset(gStringConstants, 0, sizeof(gStringConstants));\n" +
+    private void generateResolver() throws IOException {
+        //宏定义放头文件,供所有native functions文件使用
+        header.write(
+                "#define STRING_BY_ID(_idx) ((const char *) (" + sym("gBaseStrPtr") + " + " + sym("gStringIds") + "[_idx].off))\n" +
+                        "\n" +
+                        "#define STRING_BY_TYPE_ID(_idx) (STRING_BY_ID(" + sym("gTypeIds") + "[_idx].idx))\n" +
+                        "\n" +
+                        "#define STRING_BY_CLASS_ID(_idx) (STRING_BY_ID(" + sym("gClassIds") + "[_idx].idx))\n" +
+                        "\n" +
+                        "#define STRING_BY_SIGNATURE_ID(_idx) (STRING_BY_ID(" + sym("gSignatureIds") + "[_idx].idx))\n" +
+                        "\n" +
+                        "#define FIND_CLASS_BY_NAME(_className)                          \\\n" +
+                        "    clazz = (*env)->FindClass(env, _className);                 \\\n" +
+                        "    if (clazz == NULL) {                                        \\\n" +
+                        "        /*转换异常类型,保持和正常java抛一样异常*/                   \\\n" +
+                        "        (*env)->ExceptionClear(env);                            \\\n" +
+                        "        " + sym("vmThrowNoClassDefFoundError") + "(env, _className); \\\n" +
+                        "        return NULL;                                            \\\n" +
+                        "    }\n" +
+                        "\n\n"
+        );
+
+        //函数声明
+        header.write(
+                "void " + sym("resolver_init") + "(JNIEnv *env);\n" +
+                        "\n" +
+                        "void " + sym("vmThrowNoClassDefFoundError") + "(JNIEnv *env, const char *msg);\n" +
+                        "\n" +
+                        "void " + sym("vmThrowNoSuchFieldError") + "(JNIEnv *env, const char *msg);\n" +
+                        "\n" +
+                        "void " + sym("vmThrowNoSuchMethodError") + "(JNIEnv *env, const char *msg);\n" +
+                        "\n" +
+                        "const vmField *" + sym("dvmResolveField") + "(JNIEnv *env, u4 idx, bool isStatic);\n" +
+                        "\n" +
+                        "const vmMethod *" + sym("dvmResolveMethod") + "(JNIEnv *env, u4 idx, bool isStatic);\n" +
+                        "\n" +
+                        "jstring " + sym("dvmConstantString") + "(JNIEnv *env, u4 idx);\n" +
+                        "\n" +
+                        "const char *" + sym("dvmResolveTypeUtf") + "(JNIEnv *env, u4 idx);\n" +
+                        "\n" +
+                        "jclass " + sym("dvmResolveClass") + "(JNIEnv *env, u4 idx);\n" +
+                        "\n" +
+                        "jclass " + sym("dvmFindClass") + "(JNIEnv *env, const char *type);\n" +
+                        "\n" +
+                        "extern const vmResolver " + sym("dvmResolver") + ";\n" +
+                        "\n\n"
+        );
+
+        source.write("void " + sym("resolver_init") + "(JNIEnv *env) {\n" +
+                "    if(sizeof(" + sym("gFields") + ") == 0) return;\n" +
+                "    if(sizeof(" + sym("gMethods") + ") == 0) return;\n" +
+                "    if(sizeof(" + sym("gStringConstants") + ") == 0) return;\n" +
+                "    memset(" + sym("gFields") + ", 0, sizeof(" + sym("gFields") + "));\n" +
+                "    memset(" + sym("gMethods") + ", 0, sizeof(" + sym("gMethods") + "));\n" +
+                "    memset(" + sym("gStringConstants") + ", 0, sizeof(" + sym("gStringConstants") + "));\n" +
                 "}\n" +
                 "\n" +
-                "#define STRING_BY_ID(_idx) ((const char *) (gBaseStrPtr + gStringIds[_idx].off))\n" +
-                "\n" +
-                "#define STRING_BY_TYPE_ID(_idx) (STRING_BY_ID(gTypeIds[_idx].idx))\n" +
-                "\n" +
-                "#define STRING_BY_CLASS_ID(_idx) (STRING_BY_ID(gClassIds[_idx].idx))\n" +
-                "\n" +
-                "#define STRING_BY_SIGNATURE_ID(_idx) (STRING_BY_ID(gSignatureIds[_idx].idx))\n" +
-                "\n" +
-                "#define FIND_CLASS_BY_NAME(_className)                          \\\n" +
-                "    clazz = (*env)->FindClass(env, _className);                 \\\n" +
-                "    if (clazz == NULL) {                                        \\\n" +
-                "        /*转换异常类型,保持和正常java抛一样异常*/                   \\\n" +
-                "        (*env)->ExceptionClear(env);                            \\\n" +
-                "        vmThrowNoClassDefFoundError(env, _className);           \\\n" +
-                "        return NULL;                                            \\\n" +
-                "    }\n" +
-                "\n" +
-                "\n" +
-                "static void vmThrowNoClassDefFoundError(JNIEnv *env, const char *msg) {\n" +
+                "void " + sym("vmThrowNoClassDefFoundError") + "(JNIEnv *env, const char *msg) {\n" +
                 "    (*env)->ThrowNew(env, gVm.exNoClassDefFoundError, msg);\n" +
                 "}\n" +
                 "\n" +
-                "static void vmThrowNoSuchFieldError(JNIEnv *env, const char *msg) {\n" +
+                "void " + sym("vmThrowNoSuchFieldError") + "(JNIEnv *env, const char *msg) {\n" +
                 "    (*env)->ThrowNew(env, gVm.exNoSuchFieldError, msg);\n" +
                 "}\n" +
                 "\n" +
-                "static void vmThrowNoSuchMethodError(JNIEnv *env, const char *msg) {\n" +
+                "void " + sym("vmThrowNoSuchMethodError") + "(JNIEnv *env, const char *msg) {\n" +
                 "    (*env)->ThrowNew(env, gVm.exNoSuchMethodError, msg);\n" +
                 "}\n" +
                 "\n" +
-                "static const vmField *dvmResolveField(JNIEnv *env, u4 idx, bool isStatic) {\n" +
-                "    vmField *field = &gFields[idx];\n" +
+                "const vmField *" + sym("dvmResolveField") + "(JNIEnv *env, u4 idx, bool isStatic) {\n" +
+                "    vmField *field = &" + sym("gFields") + "[idx];\n" +
                 "    if (field->fieldId == NULL) {\n" +
-                "        FieldId fieldId = gFieldIds[idx];\n" +
+                "        FieldId fieldId = " + sym("gFieldIds") + "[idx];\n" +
                 "\n" +
                 "        jclass clazz;\n" +
                 "        FIND_CLASS_BY_NAME(STRING_BY_CLASS_ID(fieldId.classIdx));\n" +
@@ -148,7 +220,7 @@ public class ResolverCodeGenerator {
                 "            (*env)->DeleteLocalRef(env, clazz);\n" +
                 "\n" +
                 "            (*env)->ExceptionClear(env);\n" +
-                "            vmThrowNoSuchFieldError(env, name);\n" +
+                "            " + sym("vmThrowNoSuchFieldError") + "(env, name);\n" +
                 "            return NULL;\n" +
                 "        }\n" +
                 "        (*env)->DeleteLocalRef(env, clazz);\n" +
@@ -160,10 +232,10 @@ public class ResolverCodeGenerator {
                 "    return field;\n" +
                 "}\n" +
                 "\n" +
-                "static const vmMethod *dvmResolveMethod(JNIEnv *env, u4 idx, bool isStatic) {\n" +
-                "    vmMethod *method = &gMethods[idx];\n" +
+                "const vmMethod *" + sym("dvmResolveMethod") + "(JNIEnv *env, u4 idx, bool isStatic) {\n" +
+                "    vmMethod *method = &" + sym("gMethods") + "[idx];\n" +
                 "    if (method->methodId == NULL) {\n" +
-                "        MethodId methodId = gMethodIds[idx];\n" +
+                "        MethodId methodId = " + sym("gMethodIds") + "[idx];\n" +
                 "\n" +
                 "        jclass clazz;\n" +
                 "        FIND_CLASS_BY_NAME(STRING_BY_CLASS_ID(methodId.classIdx));\n" +
@@ -185,7 +257,7 @@ public class ResolverCodeGenerator {
                 "            (*env)->DeleteLocalRef(env, clazz);\n" +
                 "\n" +
                 "            (*env)->ExceptionClear(env);\n" +
-                "            vmThrowNoSuchMethodError(env, name);\n" +
+                "            " + sym("vmThrowNoSuchMethodError") + "(env, name);\n" +
                 "            return NULL;\n" +
                 "        }\n" +
                 "        (*env)->DeleteLocalRef(env, clazz);\n" +
@@ -201,31 +273,31 @@ public class ResolverCodeGenerator {
                 "\n" +
                 "static pthread_mutex_t str_mutex = PTHREAD_MUTEX_INITIALIZER;\n" +
 
-                "static jstring dvmConstantString(JNIEnv *env, u4 idx) {\n" +
+                "jstring " + sym("dvmConstantString") + "(JNIEnv *env, u4 idx) {\n" +
                 "    //先查找索引位置是否存在缓存,不用频繁创建string对象\n" +
-                "    if (gStringConstants[idx] == NULL) {\n" +
+                "    if (" + sym("gStringConstants") + "[idx] == NULL) {\n" +
                 "        pthread_mutex_lock(&str_mutex);\n" +
                 "        jstring str;\n" +
-                "        if (gStringConstants[idx] == NULL) {\n" +
-                "            str = (*env)->NewStringUTF(env, STRING_BY_ID(gStringConstantIds[idx].idx));\n" +
-                "            gStringConstants[idx] = (*env)->NewGlobalRef(env, str);\n" +
+                "        if (" + sym("gStringConstants") + "[idx] == NULL) {\n" +
+                "            str = (*env)->NewStringUTF(env, STRING_BY_ID(" + sym("gStringConstantIds") + "[idx].idx));\n" +
+                "            " + sym("gStringConstants") + "[idx] = (*env)->NewGlobalRef(env, str);\n" +
                 "        } else {\n" +
-                "            str = (*env)->NewLocalRef(env, gStringConstants[idx]);\n" +
+                "            str = (*env)->NewLocalRef(env, " + sym("gStringConstants") + "[idx]);\n" +
                 "        }\n" +
                 "        pthread_mutex_unlock(&str_mutex);\n" +
                 "\n" +
                 "        return str;\n" +
                 "    } else {\n" +
-                "        return (*env)->NewLocalRef(env, gStringConstants[idx]);\n" +
+                "        return (*env)->NewLocalRef(env, " + sym("gStringConstants") + "[idx]);\n" +
                 "    }\n" +
                 "}\n" +
                 "\n" +
                 "\n" +
-                "static const char *dvmResolveTypeUtf(JNIEnv *env, u4 idx) {\n" +
+                "const char *" + sym("dvmResolveTypeUtf") + "(JNIEnv *env, u4 idx) {\n" +
                 "    return STRING_BY_TYPE_ID(idx);\n" +
                 "}\n" +
                 "\n" +
-                "static jclass dvmResolveClass(JNIEnv *env, u4 idx) {\n" +
+                "jclass " + sym("dvmResolveClass") + "(JNIEnv *env, u4 idx) {\n" +
                 "    jclass clazz = getCacheClass(env, STRING_BY_TYPE_ID(idx));\n" +
                 "    if (clazz != NULL) {\n" +
                 "        return (jclass) (*env)->NewLocalRef(env, clazz);\n" +
@@ -237,8 +309,8 @@ public class ResolverCodeGenerator {
                 "}\n\n");
 
         //因为类型需要去掉开头的'L'和结尾的';',所以最大最大class名不需要再加1表示字符串结尾
-        writer.write(String.format(
-                "static jclass dvmFindClass(JNIEnv *env, const char *type) {\n" +
+        source.write(String.format(
+                "jclass " + sym("dvmFindClass") + "(JNIEnv *env, const char *type) {\n" +
                         "    jclass clazz = getCacheClass(env, type);\n" +
                         "    if (clazz != NULL) {\n" +
                         "        return (jclass) (*env)->NewLocalRef(env, clazz);\n" +
@@ -258,21 +330,22 @@ public class ResolverCodeGenerator {
                         "\n" +
                         "    return clazz;\n" +
                         "}\n\n", references.getMaxTypeLen()));
-        writer.write(
-                "static const vmResolver dvmResolver = {\n" +
-                        "        .dvmResolveField = dvmResolveField,\n" +
-                        "        .dvmResolveMethod = dvmResolveMethod,\n" +
-                        "        .dvmResolveTypeUtf = dvmResolveTypeUtf,\n" +
-                        "        .dvmResolveClass = dvmResolveClass,\n" +
-                        "        .dvmFindClass = dvmFindClass,\n" +
-                        "        .dvmConstantString = dvmConstantString,\n" +
-                        "};\n" +
-                        "\n");
+        source.write("extern const vmResolver " + sym("dvmResolver") + " = {\n" +
+                "        .dvmResolveField = " + sym("dvmResolveField") + ",\n" +
+                "        .dvmResolveMethod = " + sym("dvmResolveMethod") + ",\n" +
+                "        .dvmResolveTypeUtf = " + sym("dvmResolveTypeUtf") + ",\n" +
+                "        .dvmResolveClass = " + sym("dvmResolveClass") + ",\n" +
+                "        .dvmFindClass = " + sym("dvmFindClass") + ",\n" +
+                "        .dvmConstantString = " + sym("dvmConstantString") + ",\n" +
+                "};\n" +
+                "\n");
     }
 
-    private void generateMethodPool(Writer writer) throws IOException {
+    private void generateMethodPool() throws IOException {
         final References references = this.references;
-        writer.write(
+
+        //类型声明放入头文件
+        header.write(
                 "\n" +
                         "typedef struct {\n" +
                         "    u2 classIdx;\n" +
@@ -280,7 +353,10 @@ public class ResolverCodeGenerator {
                         "    u4 shortyIdx;\n" +
                         "    u4 sigIdx;\n" +
                         "} MethodId;\n\n");
-        writer.write("static const MethodId gMethodIds[] = {\n");
+        header.write("extern const MethodId " + sym("gMethodIds") + "[];\n");
+        header.write("extern vmMethod " + sym("gMethods") + "[];\n\n");
+
+        source.write("extern const MethodId " + sym("gMethodIds") + "[] = {\n");
 
         final List<MethodReference> methodPool = references.getMethodPool();
         for (MethodReference methodReference : methodPool) {
@@ -310,26 +386,30 @@ public class ResolverCodeGenerator {
                 throw new RuntimeException("unknown method signature");
             }
 
-            writer.write(String.format(
+            source.write(String.format(
                     "    {.classIdx=%d, .nameIdx=%d, .shortyIdx=%d, .sigIdx=%d},\n",
                     classNameIdx, nameIdx, shortyIdx, sigIdx));
         }
-        writer.write("};\n");
-        writer.write("//ends method data\n\n");
-        writer.write(String.format("static vmMethod gMethods[%d];\n", methodPool.size()));
-        writer.write("\n");
+        source.write("};\n");
+        source.write("//ends method data\n\n");
+        source.write(String.format("vmMethod %s[%d];\n", sym("gMethods"), methodPool.size()));
+        source.write("\n");
     }
 
-    private void generateFieldPool(Writer writer) throws IOException {
+    private void generateFieldPool() throws IOException {
         final References references = this.references;
-        writer.write(
+
+        header.write(
                 "\n" +
                         "typedef struct {\n" +
                         "    u2 classIdx;\n" +
                         "    u4 nameIdx;\n" +
                         "    u2 typeIdx;\n" +
                         "} FieldId;\n\n");
-        writer.write("static const FieldId gFieldIds[] = {\n");
+        header.write("extern const FieldId " + sym("gFieldIds") + "[];\n");
+        header.write("extern vmField " + sym("gFields") + "[];\n\n");
+
+        source.write("extern const FieldId " + sym("gFieldIds") + "[] = {\n");
 
         final List<FieldReference> fieldPool = references.getFieldPool();
         for (FieldReference reference : fieldPool) {
@@ -353,18 +433,27 @@ public class ResolverCodeGenerator {
                 throw new RuntimeException("unknown field type");
             }
 
-            writer.write(String.format(
+            source.write(String.format(
                     "    {.classIdx=%d, .nameIdx=%d, .typeIdx=%d},\n",
                     classNameIdx, nameIdx, typeIdx));
         }
-        writer.write("};\n");
-        writer.write("//ends field id\n\n");
-        writer.write(String.format("static vmField gFields[%d];\n", fieldPool.size()));
+        source.write("};\n");
+        source.write("//ends field id\n\n");
+        source.write(String.format("vmField %s[%d];\n", sym("gFields"), fieldPool.size()));
     }
 
 
-    private void generateStringPool(Writer writer) throws IOException {
-        writer.write("static const u1 gBaseStrPtr[]={\n");
+    private void generateStringPool() throws IOException {
+        //类型声明放头文件
+        header.write(
+                "typedef struct {\n" +
+                        "    u4 off;\n" +
+                        "} StringId;\n\n");
+        header.write("extern const u1 " + sym("gBaseStrPtr") + "[];\n");
+        header.write("extern const StringId " + sym("gStringIds") + "[];\n\n");
+
+        //定义放源文件
+        source.write("extern const u1 " + sym("gBaseStrPtr") + "[]={\n");
 
         ArrayList<Long> strOffsets = new ArrayList<>();
         long strOffset = 0;
@@ -375,34 +464,28 @@ public class ResolverCodeGenerator {
             //必须使用modified utf8，不然jni的NewStringUtf函数可能出问题.issue #3
             byte[] bytes = ModifiedUtf8.encode(string);
 
-            writer.write("    ");
+            source.write("    ");
             for (byte aByte : bytes) {
-                writer.write(String.format("0x%02x,", aByte & 0xFF));
+                source.write(String.format("0x%02x,", aByte & 0xFF));
             }
-            writer.write("0x00,\n");
+            source.write("0x00,\n");
 
             strOffsets.add(strOffset);
             strOffset += bytes.length + 1;
         }
-        writer.write("};\n\n");
+        source.write("};\n\n");
 
-        writer.write(
-                "\n" +
-                        "typedef struct {\n" +
-                        "    u4 off;\n" +
-                        "} StringId;\n");
-
-        writer.write("static const StringId gStringIds[] = {\n");
+        source.write("extern const StringId " + sym("gStringIds") + "[] = {\n");
         for (Long offset : strOffsets) {
             if (offset > 0xFFFFFFFFL) {
                 throw new RuntimeException("string offset too long");
             }
-            writer.write(String.format("    {.off=0x%04x},\n", offset));
+            source.write(String.format("    {.off=0x%04x},\n", offset));
         }
-        writer.write("};\n");
-        writer.write("//ends string ids\n\n");
+        source.write("};\n");
+        source.write("//ends string ids\n\n");
 
-        writer.flush();
+        source.flush();
     }
 
     static String stringEsc(String str) throws UTFDataFormatException {
@@ -414,34 +497,36 @@ public class ResolverCodeGenerator {
         return sb.toString();
     }
 
-    private void generateTypePool(Writer writer) throws IOException {
+    private void generateTypePool() throws IOException {
 
-        writer.write(
+        header.write(
                 "\n" +
                         "typedef struct {\n" +
                         "    u4 idx;\n" +
-                        "} TypeId;\n");
+                        "} TypeId;\n\n");
+        header.write("extern const TypeId " + sym("gTypeIds") + "[];\n\n");
 
-        writer.write("static const TypeId gTypeIds[] = {\n");
+        source.write("extern const TypeId " + sym("gTypeIds") + "[] = {\n");
         final References references = this.references;
         for (String type : references.getTypePool()) {
-            writer.write(String.format("    {.idx=%d},\n", references.getStringItemIndex(type)));
+            source.write(String.format("    {.idx=%d},\n", references.getStringItemIndex(type)));
         }
-        writer.write("};\n");
-        writer.write("//ends type ids\n\n");
-        writer.flush();
+        source.write("};\n");
+        source.write("//ends type ids\n\n");
+        source.flush();
     }
 
     //根据类型池,去掉L开头和;得到class name,其他则不变
-    private void generateClassNamePool(Writer writer) throws IOException {
-        writer.write(
+    private void generateClassNamePool() throws IOException {
+        header.write(
                 "\n" +
                         "typedef struct {\n" +
                         "    u4 idx;\n" +
-                        "} ClassId;\n");
+                        "} ClassId;\n\n");
+        header.write("extern const ClassId " + sym("gClassIds") + "[];\n\n");
 
 
-        writer.write("static const ClassId gClassIds[] = {\n");
+        source.write("extern const ClassId " + sym("gClassIds") + "[] = {\n");
 
         final References references = this.references;
         for (String className : references.getClassNamePool()) {
@@ -449,20 +534,21 @@ public class ResolverCodeGenerator {
             if (classNameIdx < 0) {
                 throw new RuntimeException("string not contain");
             }
-            writer.write(String.format("    {.idx=%d},\n", classNameIdx));
+            source.write(String.format("    {.idx=%d},\n", classNameIdx));
 
         }
-        writer.write("};\n");
-        writer.write("//ends class name ids\n\n");
+        source.write("};\n");
+        source.write("//ends class name ids\n\n");
     }
 
-    private void generateSignaturePool(Writer writer) throws IOException {
-        writer.write(
+    private void generateSignaturePool() throws IOException {
+        header.write(
                 "typedef struct {\n" +
                         "    u4 idx;\n" +
-                        "} SignatureId;\n");
+                        "} SignatureId;\n\n");
+        header.write("extern const SignatureId " + sym("gSignatureIds") + "[];\n\n");
 
-        writer.write("static const SignatureId gSignatureIds[] = {\n");
+        source.write("extern const SignatureId " + sym("gSignatureIds") + "[] = {\n");
 
         final References references = this.references;
         for (String sig : references.getSignaturePool()) {
@@ -470,9 +556,9 @@ public class ResolverCodeGenerator {
             if (sigIdx < 0) {
                 throw new RuntimeException("string not contain");
             }
-            writer.write(String.format("    {.idx=%d},\n", sigIdx));
+            source.write(String.format("    {.idx=%d},\n", sigIdx));
         }
-        writer.write("};\n");
-        writer.write("//ends method signature pool\n\n");
+        source.write("};\n");
+        source.write("//ends method signature pool\n\n");
     }
 }

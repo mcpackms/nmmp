@@ -8,6 +8,11 @@ public class Config {
     @SerializedName("environment")
     public PathConfig environment;
 
+    @SerializedName("lib_name")
+    public String lib_name;
+    @SerializedName("vm_lib_name")
+    public String vm_lib_name;
+
     public Config(AbiConfig abi, PathConfig environment) {
         this.abi = abi;
         this.environment = environment;

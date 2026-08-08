@@ -5,11 +5,11 @@
 
 + 配置ndk及环境变量
 
-不编译nmm-protect，可以直接看使用它生成项目及最后的apk，[一个对apk处理的例子](https://github.com/maoabc/nmmp/releases/download/demo/demo.zip)。
+不编译nmm-protect，可以直接看使用它生成项目及最后的apk，[一个对apk处理的例子](https://github.com/mcpackms/nmmp/releases/download/demo/demo.zip)。
 
 例子在linux环境下测试的，windows也应该没问题,先安装好JDK及android sdk和ndk。
 
-下载[vm-protect.jar](https://github.com/maoabc/nmmp/releases/download/last/vm-protect-2023-07-08-0942.jar),配置好环境变量ANDROID_SDK_HOME、ANDROID_NDK_HOME:
+下载[vm-protect.jar](https://github.com/mcpackms/nmmp/releases/download/last/vm-protect-2023-07-08-0942.jar),配置好环境变量ANDROID_SDK_HOME、ANDROID_NDK_HOME:
 ``` bash
 export ANDROID_SDK_HOME=/opt/android-sdk
 export ANDROID_NDK_HOME=/opt/android-sdk/ndk/22.1.7171670
@@ -44,9 +44,41 @@ jarsigner -keystore ~/.myapp.jks -storepass pass -keypass pass test-protect.aab 
 java -jar vm-protect-xxx.jar aar testModule.aar convertRules.txt
 ```
 
++ 输出 so 库名称
+
+默认生成的 so 库名为 `libnmmp.so`（vm 子库为 `libnmmvm.so`），可按下面优先级（高→低）自定义：
+1. 命令行参数:
+``` bash
+java -jar vm-protect-xxx.jar apk -libname=mymsp --vmlibname=myvm00 input.apk convertRules.txt mapping.txt
+```
+   同时支持 `--libname=` 长选项形式。
+2. 环境变量:
+   ``` bash
+   export NMMP_LIB_NAME=mymsp
+   export NMMP_VM_LIB_NAME=myvm
+   ```
+3. jar 旁的 `tools/config.json`（首次运行自动生成，也可手动编辑）中字段:
+   ``` json
+   "lib_name": "nmmp",
+   "vm_lib_name": "nmmvm"
+   ```
+自定义后，CMake 库名、输出 `libxxx.so` 文件名及注入加载入口都会同步生效。
+
++ 并行编译
+
+可用 `-j <n>` 或 `--jobs=<n>` 指定并行度（默认取 CPU 核数），体现在三处: 多 dex 同时转换、生成 C 代码拆分、多 ABI 的 CMake/ninja 并行编译。
+
++ C 代码文件拆分
+
+为充分利用 ninja 并行编译并避免单文件过大，每个 dex 生成的 C 代码会拆分:
+- 每个文件最多 500 个方法，最多 1000 个文件，超出部分自动落入最后一个文件;
+- 每个 dex 生成 `<dex>_resolver.h/.c`（符号表/解析器）和一组 `<dex>_native_functions_<i>.c`，各为独立编译单元并行编译;
+- 多个 dex 的同名符号均以 dex 名作前缀（如 `classes2_*`），可合并链接进同一个 so;
+- 文件数和每个文件的方法数可在 `JniCodeGenerator` 中调整。
+
 + 下载及编译项目
 ``` bash
-git clone https://github.com/maoabc/nmmp.git
+git clone https://github.com/mcpackms/nmmp.git
 cd nmmp/nmm-protect
 ./gradlew arsc:build
 ./gradlew build
@@ -122,4 +154,4 @@ vmCode提供执行所需要的指令、异常表及寄存器空间，vmResolver�
 
 
 # Licences
-nmm-protect 以gpl协议发布,[nmm-protect licence](https://github.com/maoabc/nmmp/blob/master/nmm-protect/LICENSE), dex-vm部分以Apache协议发布, [nmmvm licence](https://github.com/maoabc/nmmp/blob/master/nmmvm/LICENSE). 只有vm部分会打包进apk中, nmm-protect只是转换dex,协议不影响生成的结果.
+nmm-protect 以gpl协议发布,[nmm-protect licence](https://github.com/mcpackms/nmmp/blob/master/nmm-protect/LICENSE), dex-vm部分以Apache协议发布, [nmmvm licence](https://github.com/mcpackms/nmmp/blob/master/nmmvm/LICENSE). 只有vm部分会打包进apk中, nmm-protect只是转换dex,协议不影响生成的结果.

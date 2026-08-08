@@ -124,7 +124,7 @@ public class ApkProtect {
             final File newManDex = internNativeUtilClassDef(
                     mainDex,
                     globalConfig,
-                    BuildNativeLib.NMMP_NAME);
+                    BuildNativeLib.getLibName());
             //替换为新的dex
             outDexFiles.set(0, newManDex);
 

@@ -54,6 +54,9 @@ public class JniCodeGenerator {
     private final InstructionRewriter instructionRewriter;
     private final DexBackedDexFile dexFile;
 
+    //当前处理的 dex 名(如 classes2),用于给跨编译单元符号加前缀
+    private String dexName;
+
     public JniCodeGenerator(@Nonnull DexBackedDexFile dexFile,
                             @Nonnull ClassAnalyzer analyzer,
                             @Nonnull InstructionRewriter instructionRewriter) {
@@ -66,6 +69,13 @@ public class JniCodeGenerator {
 
         instructionRewriter.loadReferences(resolverCodeGenerator.getReferences(), analyzer);
 
+    }
+
+    /**
+     * resolver 符号名(带 dex 前缀)
+     */
+    private String resolverSym(String base) {
+        return dexName + "_" + base;
     }
 
     public void addMethod(Method method, Writer writer) throws IOException {
@@ -92,7 +102,7 @@ public class JniCodeGenerator {
         // 使用 StringBuilder 批量构建函数签名（参数列表部分）
         StringBuilder sb = new StringBuilder(4096);
 
-        sb.append(isRegisterNative ? "static " : "JNIEXPORT ");
+        sb.append(isRegisterNative ? "" : "JNIEXPORT ");
         sb.append(getJNIType(returnType)).append(' ');
         sb.append(MyMethodUtil.getJniFunctionName(clazzName, methodName, parameterTypes, returnType));
         sb.append("(JNIEnv *env, ");
@@ -208,13 +218,13 @@ public class JniCodeGenerator {
             writer.write("\n" +
                     "    volatile jvalue value = vmInterpret(env,\n" +
                     "                                &code,\n" +
-                    "                                &dvmResolver);\n"
+                    "                                &" + resolverSym("dvmResolver") + ");\n"
             );
         } else {
             writer.write("\n" +
                     "    vmInterpret(env,\n" +
                     "              &code,\n" +
-                    "              &dvmResolver);\n"
+                    "              &" + resolverSym("dvmResolver") + ");\n"
             );
         }
 
@@ -242,8 +252,11 @@ public class JniCodeGenerator {
         return nativeMethodOffsets;
     }
 
-    public void generate(DexConfig config, Writer resolverWriter, Writer codeWriter) throws IOException {
-        resolverCodeGenerator.generate(resolverWriter);
+    public void generate(DexConfig config, Writer resolverHeaderWriter, Writer resolverWriter, Writer codeWriter) throws IOException {
+        this.dexName = config.getDexName();
+
+        //生成 resolver 头文件(声明)与源文件(定义)
+        resolverCodeGenerator.generate(resolverHeaderWriter, resolverWriter, dexName);
 
         // 收集所有需要处理的方法
         List<DexBackedMethod> allMethods = new ArrayList<>();
@@ -266,39 +279,39 @@ public class JniCodeGenerator {
             maxMethodsPerFile = (totalMethods + fileCount - 1) / fileCount;
         }
 
-        // 如果只需要一个文件，使用原始方式（直接写入 codeWriter）
+        generateNativeFunctions(config, codeWriter, allMethods, fileCount, maxMethodsPerFile);
+    }
+
+    /**
+     * 生成 native functions C 代码
+     * <p>
+     * 单文件: 直接写入 codeWriter(<dex>_native_functions.c)
+     * 多文件: 每个拆分文件是独立的编译单元, 由 ninja 并行编译, 最后一个文件包含注册代码与 setup 函数
+     */
+    private void generateNativeFunctions(DexConfig config, Writer codeWriter, List<DexBackedMethod> methods,
+                                         int fileCount, int maxMethodsPerFile) throws IOException {
         if (fileCount <= 1) {
-            generateSingleFile(config, codeWriter, allMethods);
-        } else {
-            generateSplitFiles(config, codeWriter, allMethods, fileCount, maxMethodsPerFile);
-        }
-    }
+            //单文件模式,直接写入主文件
+            writeFileHeader(config, codeWriter);
 
-    /**
-     * 生成单个 C 文件（原始方式）
-     */
-    private void generateSingleFile(DexConfig config, Writer codeWriter, List<DexBackedMethod> methods) throws IOException {
-        writeFileHeader(config, codeWriter);
+            for (DexBackedMethod method : methods) {
+                addMethod(method, codeWriter);
+            }
 
-        for (DexBackedMethod method : methods) {
-            addMethod(method, codeWriter);
+            generateNativeMethodCode(config, codeWriter);
+            writeSetupFunction(config, codeWriter);
+            writeFileFooter(config, codeWriter);
+            return;
         }
 
-        generateNativeMethodCode(config, codeWriter);
-        writeSetupFunction(config, codeWriter);
-        writeFileFooter(config, codeWriter);
-    }
-
-    /**
-     * 拆分为多个 C 文件
-     * 超过 MAX_FILES 时，剩余方法全部放入最后一个文件
-     */
-    private void generateSplitFiles(DexConfig config, Writer codeWriter, List<DexBackedMethod> methods,
-                                    int fileCount, int maxMethodsPerFile) throws IOException {
         File outputDir = config.getOutputDir();
         String dexName = config.getDexName();
 
-        // 生成多个 C 文件
+        // 每个拆分文件都生成全部方法的前置声明;
+        // 最后一个文件的注册代码(gNativeMethods)会引用其他编译单元里的方法, 没有声明无法编译
+        final String functionDeclarations = buildFunctionDeclarations(methods);
+
+        // 拆分为多个独立编译单元, 每个文件一个 .o, 由 cmake -j 并行编译
         for (int i = 0; i < fileCount; i++) {
             int startIdx = i * maxMethodsPerFile;
             int endIdx = Math.min(startIdx + maxMethodsPerFile, methods.size());
@@ -310,6 +323,9 @@ public class JniCodeGenerator {
             File cFile = new File(outputDir, dexName + "_native_functions_" + i + ".c");
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(cFile), 64 * 1024)) {
                 writeFileHeader(config, writer);
+
+                // 全部方法的跨文件前置声明
+                writer.write(functionDeclarations);
 
                 for (DexBackedMethod method : fileMethods) {
                     addMethod(method, writer);
@@ -324,15 +340,40 @@ public class JniCodeGenerator {
             }
         }
 
-        // 在主文件中生成 include 指令，包含所有拆分文件
-        for (int i = 0; i < fileCount; i++) {
-            codeWriter.write(String.format("#include \"%s_native_functions_%d.c\"\n", dexName, i));
-        }
-        codeWriter.write("\n");
+        // 主文件仅保留注释, 实际编译单元是各拆分文件
+        codeWriter.write("// native functions are split into " + dexName + "_native_functions_0.c ~ _" +
+                (fileCount - 1) + ".c, compiled separately\n");
     }
 
     /**
-     * 写入 C 文件头（不包含 resolver，resolver 单独编译）
+     * 为所有待生成的 method 构建前置声明文本, 供拆分后的独立编译单元交叉引用
+     */
+    private String buildFunctionDeclarations(List<DexBackedMethod> methods) {
+        StringBuilder sb = new StringBuilder(methods.size() * 64);
+        for (DexBackedMethod method : methods) {
+            final boolean isStatic = AccessFlags.STATIC.isSet(method.getAccessFlags());
+            final String classType = method.getDefiningClass();
+            final String clazzName = classType.substring(1, classType.length() - 1);
+            final String methodName = method.getName();
+            final List<? extends CharSequence> parameterTypes = method.getParameterTypes();
+            final String returnType = method.getReturnType();
+
+            sb.append(getJNIType(returnType)).append(' ');
+            sb.append(MyMethodUtil.getJniFunctionName(clazzName, methodName, parameterTypes, returnType));
+            sb.append("(JNIEnv *env, ");
+            sb.append(isStatic ? "jclass jcls" : "jobject thiz");
+
+            int argNum = isStatic ? 0 : 1;
+            for (int i = 0, size = parameterTypes.size(); i < size; i++) {
+                sb.append(", ").append(getJNIType(parameterTypes.get(i).toString())).append(" p").append(argNum++);
+            }
+            sb.append(");\n");
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 写入 C 文件头(各拆分文件均为独立编译单元, include resolver 头文件获取声明与宏)
      */
     private void writeFileHeader(DexConfig config, Writer writer) throws IOException {
         writer.write("\n" +
@@ -341,6 +382,7 @@ public class JniCodeGenerator {
                 "#include <malloc.h>\n" +
                 "#include <jni.h>\n" +
                 "#include \"vm.h\"\n" +
+                "#include \"" + config.getDexName() + "_resolver.h\"\n" +
                 "\n" +
                 "#ifdef __cplusplus\n" +
                 "extern \"C\" {\n" +
@@ -373,7 +415,7 @@ public class JniCodeGenerator {
         codeWriter.write(String.format("void %s(JNIEnv *env) {\n", config.getHeaderFileAndSetupFunc().setupFunctionName));
 
         codeWriter.write("\n    //符号解析器初始化\n");
-        codeWriter.write("    resolver_init(env);\n\n");
+        codeWriter.write("    " + resolverSym("resolver_init") + "(env);\n\n");
 
         if (isRegisterNative) {
             codeWriter.write("    //注册\n");

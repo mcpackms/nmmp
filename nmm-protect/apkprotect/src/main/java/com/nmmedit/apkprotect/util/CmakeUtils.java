@@ -63,7 +63,7 @@ public class CmakeUtils {
         }
     }
 
-    public static void writeCmakeFile(File cmakeTemp, String libName) throws IOException {
+    public static void writeCmakeFile(File cmakeTemp, String libName, String vmLibName) throws IOException {
         final BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(
                 new FileInputStream(cmakeTemp), StandardCharsets.UTF_8));
 
@@ -71,8 +71,12 @@ public class CmakeUtils {
         //定位cmake里的语句,防止替换错误
         String libNameFormat = "set\\(LIBNAME_PLACEHOLDER \"%s\"\\)";
 
-        //替换原本libname
+        //替换主 so 库名
         lines = lines.replaceAll(String.format(libNameFormat, "nmmp"), String.format(libNameFormat, libName));
+
+        //替换 vm so 库名
+        lines = lines.replaceAll("set\\(LIBNMMVM_NAME \\\"NMMVM_PLACEHOLDER\\\"",
+                String.format("set(LIBNMMVM_NAME \"%s\"", vmLibName));
 
         try (FileWriter fileWriter = new FileWriter(cmakeTemp)) {
             fileWriter.write(lines);
@@ -101,8 +105,8 @@ public class CmakeUtils {
                 //根据指令重写规则重新生成DexOpcodes.h文件
                 writeOpcodeHeaderFile(source, instructionRewriter);
             } else if (source.getName().equals("CMakeLists.txt")) {
-                //处理cmake里配置的本地库名
-                writeCmakeFile(source, BuildNativeLib.NMMP_NAME);
+                //处理cmake里配置的本地库名(vm/CMakeLists.txt 也会匹配, 两个占位符都会被处理)
+                writeCmakeFile(source, BuildNativeLib.getLibName(), BuildNativeLib.getVmLibName());
             } else if (source.getName().endsWith("vm.h")) {
                 writeRandomResolver(source);
             } else if (source.getName().endsWith("JNIWrapper.h")) {

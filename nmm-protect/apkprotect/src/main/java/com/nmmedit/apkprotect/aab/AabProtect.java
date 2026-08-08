@@ -112,7 +112,7 @@ public class AabProtect {
 
             final File newMainDex = ApkProtect.internNativeUtilClassDef(
                     mainDex,
-                    globalConfig, BuildNativeLib.NMMP_NAME);
+                    globalConfig, BuildNativeLib.getLibName());
             //替换为新的dex
             outDexFiles.set(0, newMainDex);
 

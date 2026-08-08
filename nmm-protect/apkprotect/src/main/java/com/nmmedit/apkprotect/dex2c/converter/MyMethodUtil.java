@@ -78,6 +78,12 @@ public class MyMethodUtil {
                 case '[':
                     sb.append("_3");
                     break;
+                case '<':
+                case '>':
+                    // 构造函数/静态构造函数名(<init>/<clinit>)无法直接嵌入 C 函数名, 按 JNI 转义规则处理
+                    sb.append("_0");
+                    sb.append(Hex.u2(c));
+                    break;
                 case '$':
                 case '-':
                 case '+':

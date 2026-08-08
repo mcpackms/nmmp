@@ -2,6 +2,7 @@ package com.nmmedit.protect;
 
 import com.nmmedit.apkprotect.ApkFolders;
 import com.nmmedit.apkprotect.ApkProtect;
+import com.nmmedit.apkprotect.BuildNativeLib;
 import com.nmmedit.apkprotect.ParallelConfig;
 import com.nmmedit.apkprotect.deobfus.MappingReader;
 import com.nmmedit.apkprotect.dex2c.converter.ClassAnalyzer;
@@ -32,6 +33,8 @@ public class ApkMain {
                 parallelConfig = ParallelConfig.fromArg(arg);
             } else if (arg.startsWith("--jobs=")) {
                 parallelConfig = ParallelConfig.fromArg(arg);
+            } else if (BuildNativeLib.parseLibNameArg(arg)) {
+                // -libname=xxx / -vmlibname=xxx 等库名选项
             } else {
                 positionalArgs.add(arg);
             }
@@ -43,6 +46,7 @@ public class ApkMain {
         }
 
         System.out.println("Jobs: " + parallelConfig.getJobCount());
+        System.out.println("Lib name: " + BuildNativeLib.getLibName());
 
         final File apk = new File(positionalArgs.get(0));
         final File outDir = new File(apk.getParentFile(), "build");

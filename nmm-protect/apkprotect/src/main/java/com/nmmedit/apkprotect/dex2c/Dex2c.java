@@ -15,6 +15,7 @@ import com.nmmedit.apkprotect.dex2c.converter.structs.MethodConverter;
 import com.nmmedit.apkprotect.dex2c.converter.structs.MyClassDef;
 import com.nmmedit.apkprotect.dex2c.converter.structs.RegisterNativesCallerClassDef;
 import com.nmmedit.apkprotect.dex2c.filters.ClassAndMethodFilter;
+import com.nmmedit.apkprotect.util.FileUtils;
 import com.nmmedit.apkprotect.util.Pair;
 
 import javax.annotation.Nonnull;
@@ -65,6 +66,8 @@ public class Dex2c {
                                                @Nonnull ClassAnalyzer classAnalyzer,
                                                @Nonnull File outDir,
                                                @Nonnull ParallelConfig parallelConfig) throws IOException {
+        //清理输出目录,避免上一次运行残留的旧拆分文件(*_native_functions_N.c)被 CMake 重新编译
+        FileUtils.deleteFile(outDir);
         if (!outDir.exists()) outDir.mkdirs();
         final GlobalDexConfig globalConfig = new GlobalDexConfig(outDir);
 
@@ -131,6 +134,9 @@ public class Dex2c {
                                             @Nonnull ClassAnalyzer classAnalyzer,
                                             @Nonnull InstructionRewriter instructionRewriter,
                                             @Nonnull File outDir) throws IOException {
+        //清理输出目录,避免上一次运行残留的旧拆分文件
+        FileUtils.deleteFile(outDir);
+        if (!outDir.exists()) outDir.mkdirs();
         final GlobalDexConfig globalDexConfig = new GlobalDexConfig(outDir);
         final DexConfig dexConfig = handleDex(dexFile, filter, classAnalyzer, instructionRewriter, outDir);
         globalDexConfig.addDexConfig(dexConfig);
@@ -158,6 +164,7 @@ public class Dex2c {
         //根据符号dex生成c代码
         try (FileWriter nativeCodeWriter = new FileWriter(config.getNativeFunctionsFile());
              FileWriter resolverWriter = new FileWriter(config.getResolverFile());
+             FileWriter resolverHeaderWriter = new FileWriter(config.getResolverHeaderFile());
         ) {
             JniCodeGenerator codeGenerator = new JniCodeGenerator(nativeImplDexFile,
                     classAnalyzer,
@@ -165,6 +172,7 @@ public class Dex2c {
 
             codeGenerator.generate(
                     config,
+                    resolverHeaderWriter,
                     resolverWriter,
                     nativeCodeWriter
             );

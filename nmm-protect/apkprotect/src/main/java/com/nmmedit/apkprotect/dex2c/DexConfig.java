@@ -113,6 +113,13 @@ public class DexConfig {
         return new File(outputDir, dexName + "_resolver.c");
     }
 
+    /**
+     * 符号解析器头文件(声明+宏), 供各 native functions 文件 include
+     */
+    public File getResolverHeaderFile() {
+        return new File(outputDir, dexName + "_resolver.h");
+    }
+
     public static class HeaderFileAndSetupFuncName {
         public final File headerFile;
         public final String setupFunctionName;

@@ -19,5 +19,9 @@
     "ndk_toolchains": "/toolchains/llvm/prebuilt/",
     "ndk_abi": "linux-x86_64",
     "ndk_strip": "/bin/llvm-strip"
-  }
+  },
+  // Output .so library name. Priority: command line > env (NMMP_LIB_NAME) > this file > default "nmmp"
+  "lib_name": "nmmp",
+  // VM .so library name. Priority: command line > env (NMMP_VM_LIB_NAME) > this file > default "nmmvm"
+  "vm_lib_name": "nmmvm"
 }

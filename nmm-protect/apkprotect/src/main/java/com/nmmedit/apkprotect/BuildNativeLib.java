@@ -24,6 +24,81 @@ public class BuildNativeLib {
     //虚拟机库名称,如果cmake里配置为静态库,这个可以忽略
     public static final String VM_NAME = "nmmvm";
 
+    //通过命令行参数设置的库名, 优先级: 命令行参数 > 环境变量 > tools/config.json > 默认值
+    private static volatile String soLibName;
+    private static volatile String vmLibName;
+
+    /**
+     * 命令行参数设置 so 库名(优先级最高)
+     */
+    public static void setLibName(String name) {
+        if (name != null && !name.trim().isEmpty()) {
+            soLibName = name.trim();
+        }
+    }
+
+    public static void setVmLibName(String name) {
+        if (name != null && !name.trim().isEmpty()) {
+            vmLibName = name.trim();
+        }
+    }
+
+    /**
+     * 解析 -libname / --libname=xxx, 返回 true 表示这是库名选项
+     */
+    public static boolean parseLibNameArg(String arg) {
+        if (arg.startsWith("-libname=" )) {
+            setLibName(arg.substring("-libname=".length()));
+            return true;
+        } else if (arg.startsWith("--libname=")) {
+            setLibName(arg.substring("--libname=".length()));
+            return true;
+        } else if (arg.startsWith("-vmlibname=")) {
+            setVmLibName(arg.substring("-vmlibname=".length()));
+            return true;
+        } else if (arg.startsWith("--vmlibname=")) {
+            setVmLibName(arg.substring("--vmlibname=".length()));
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 解析出的 so 库名(优先级: 命令行 > 环境变量 > 配置文件 > 默认)
+     */
+    public static String getLibName() {
+        if (soLibName != null && !soLibName.isEmpty()) {
+            return soLibName;
+        }
+        final String env = System.getenv("NMMP_LIB_NAME");
+        if (env != null && !env.isEmpty()) {
+            return env.trim();
+        }
+        final String conf = Prefs.libName();
+        if (conf != null && !conf.isEmpty()) {
+            return conf.trim();
+        }
+        return NMMP_NAME;
+    }
+
+    /**
+     * 最终解析出的 vm 库名
+     */
+    public static String getVmLibName() {
+        if (vmLibName != null && !vmLibName.isEmpty()) {
+            return vmLibName;
+        }
+        final String env = System.getenv("NMMP_VM_LIB_NAME");
+        if (env != null && !env.isEmpty()) {
+            return env.trim();
+        }
+        final String conf = Prefs.vmLibName();
+        if (conf != null && !conf.isEmpty()) {
+            return conf.trim();
+        }
+        return VM_NAME;
+    }
+
     /**
      * 生成 native libs（使用默认并行配置）
      */
@@ -316,7 +391,7 @@ public class BuildNativeLib {
             final File stripOutputDir = new File(getLibStripOutputDir());
             if (!stripOutputDir.exists()) stripOutputDir.mkdirs();
 
-            final String vm = "lib" + VM_NAME + ".so";
+            final String vm = "lib" + getVmLibName() + ".so";
 
             File vmFile = new File(libSymOutputDir, vm);
             if (!vmFile.exists()) {
@@ -329,7 +404,7 @@ public class BuildNativeLib {
 
             map.put(vmFile, new File(stripOutputDir, vm));
 
-            final String vmp = "lib" + NMMP_NAME + ".so";
+            final String vmp = "lib" + getLibName() + ".so";
             File vmpFile = new File(libSymOutputDir, vmp);
             if (!vmpFile.exists()) {
                 //windows

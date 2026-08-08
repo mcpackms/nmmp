@@ -171,7 +171,7 @@ public class AarProtect {
 
             //生成NativeUtil,添加进jar
             final byte[] bytes = AsmUtils.genCfNativeUtil(dexConfig.getRegisterNativesClassName(),
-                    BuildNativeLib.NMMP_NAME,
+                    BuildNativeLib.getLibName(),
                     Collections.singletonList(dexConfig.getRegisterNativesMethodName()));
             outZip.add(new BytesSource(bytes, dexConfig.getRegisterNativesClassName() + ".class", Deflater.DEFAULT_COMPRESSION));
         }
