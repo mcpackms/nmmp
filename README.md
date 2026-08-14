@@ -7,7 +7,7 @@
 java -jar nmmp.jar -jN/--jobN apk apkfile.apk
 ```
 
-一下是原nmmp的README
+以下是原nmmp的README
 # nmmp
 基于dex-vm运行dalvik字节码从而对dex进行保护，增加反编译难度。
 项目分为两部分nmm-protect是纯java项目，对dex进行转换，把dex里数据转为c结构体，opcode随机化生成ndk项目,编译后生成加固后的apk。nmmvm是一个安卓项目，包含dex-vm实现及各种dalvik指令的测试等。
